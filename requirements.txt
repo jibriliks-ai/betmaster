@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+python-telegram-bot[all]==20.7
+python-dotenv
+sqlalchemy
+requests
+openai
+psycopg2-binary
