@@ -1,45 +1,73 @@
-import os
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, Date
-from sqlalchemy.orm import declarative_base, sessionmaker
-from datetime import date
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from datetime import datetime, date
+import json, os
 
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./betmaster.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-if not DATABASE_URL:
-    DATABASE_URL = "sqlite:///./betmaster.db"
-    print("Using SQLite fallback - no DATABASE_URL set")
-
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
+SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
 class User(Base):
     __tablename__ = "users"
-    id = Column(Integer, primary_key=True)
-    telegram_id = Column(Integer, unique=True, index=True)
+    user_id = Column(Integer, primary_key=True)
     username = Column(String, default="")
-    is_vip = Column(Boolean, default=False)
-    vip_expiry = Column(Date, nullable=True)
     daily_count = Column(Integer, default=0)
-    last_date = Column(Date, default=date.today)
+    last_reset = Column(String, default=str(date.today())) # YYYY-MM-DD
+    total_chats = Column(Integer, default=0)
+    is_vip = Column(Boolean, default=False)
+    vip_expiry = Column(String, default="") # YYYY-MM-DD
+    favorite_league = Column(String, default="Premier League")
+    league_history = Column(Text, default="{}") # json {"Premier League": 5}
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 Base.metadata.create_all(bind=engine)
 
-def get_user(db, telegram_id: int):
-    user = db.query(User).filter(User.telegram_id == telegram_id).first()
+def get_user(db, user_id, username=""):
+    user = db.query(User).filter(User.user_id == user_id).first()
+    today_str = str(date.today())
+
     if not user:
-        user = User(telegram_id=telegram_id, daily_count=0, last_date=date.today())
+        user = User(user_id=user_id, username=username, last_reset=today_str)
         db.add(user)
         db.commit()
         db.refresh(user)
-    if user.last_date != date.today():
+        return user
+
+    # Reset daily count if new day
+    if user.last_reset!= today_str:
         user.daily_count = 0
-        user.last_date = date.today()
+        user.last_reset = today_str
         db.commit()
-    if user.vip_expiry and user.vip_expiry < date.today():
-        user.is_vip = False
+
+    # Check VIP expiry
+    if user.is_vip and user.vip_expiry:
+        if user.vip_expiry < today_str:
+            user.is_vip = False
+            db.commit()
+
+    if username and user.username!= username:
+        user.username = username
         db.commit()
+
     return user
+
+def update_league_history(db, user, league):
+    try:
+        hist = json.loads(user.league_history or "{}")
+    except:
+        hist = {}
+    hist[league] = hist.get(league, 0) + 1
+    user.league_history = json.dumps(hist)
+    # Set favorite = most chatted league
+    if hist:
+        user.favorite_league = max(hist, key=hist.get)
+    user.total_chats += 1
+    db.commit()
+
+def get_all_users(db):
+    return db.query(User).all()
