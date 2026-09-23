@@ -1,8 +1,8 @@
 fastapi
-uvicorn[standard]
-python-telegram-bot==21.6
+uvicorn
 python-dotenv
-sqlalchemy==2.0.23
 requests
+python-telegram-bot==20.7
+sqlalchemy
 openai
-psycopg2-binary
+httpx
