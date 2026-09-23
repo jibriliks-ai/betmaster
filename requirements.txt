@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-python-telegram-bot[all]==20.7
+python-telegram-bot[all]==20.8
 python-dotenv
 sqlalchemy
 requests
