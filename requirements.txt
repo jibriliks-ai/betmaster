@@ -1,8 +1,8 @@
 fastapi
 uvicorn
-python-dotenv
 requests
-python-telegram-bot==20.7
+python-dotenv
 sqlalchemy
-openai
-httpx
+beautifulsoup4
+lxml
+psycopg2-binary
