@@ -28,7 +28,7 @@ class User(Base):
 class PostedHistory(Base):
     __tablename__ = "posted_history"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    fixture_hash = Column(String, unique=True) # e.g. Arsenal-Chelsea-2025-09-25
+    fixture_hash = Column(String, unique=True)
     posted_date = Column(String, default=str(date.today()))
 
 Base.metadata.create_all(bind=engine)
@@ -57,8 +57,7 @@ def update_league_history(db, user, league):
     user.total_chats += 1; db.commit()
 
 def is_already_posted(db, fixture_hash):
-    exists = db.query(PostedHistory).filter(PostedHistory.fixture_hash == fixture_hash).first()
-    return bool(exists)
+    return bool(db.query(PostedHistory).filter(PostedHistory.fixture_hash == fixture_hash).first())
 
 def mark_as_posted(db, fixture_hash):
     try:
