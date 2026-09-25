@@ -305,4 +305,131 @@ threading.Thread(target=channel_scheduler, daemon=True).start()
 
 @app.get("/")
 async def home():
-    return {"status": "SUPER
+    return {"status": "SUPER BRAIN LIVE WITH PREDICT BUTTON", "support": SUPPORT_HANDLE, "bots": [BOT_HANDLE, BOT_HANDLE_2]}
+
+@app.get("/post-now")
+async def post_now():
+    from predictor import fetch_real_fixtures, get_ai_prediction
+    from database import SessionLocal, is_already_posted, mark_as_posted
+    db = SessionLocal()
+    try:
+        fixtures = fetch_real_fixtures(limit=10)
+        unique = []
+        for f in fixtures:
+            h = f"{f['home']}-{f['away']}-{str(date.today())}-manual-{random.randint(1,9999)}"
+            if not is_already_posted(db, h):
+                unique.append(f)
+                mark_as_posted(db, h)
+                if len(unique) >= 2:
+                    break
+        if not unique:
+            unique = fixtures[:2]
+        msg = f"🔥 Test {datetime.now().strftime('%H:%M:%S')}\n\n"
+        for f in unique:
+            d = {"home": f["home"], "away": f["away"], "league": f["league"], "home_xg": 1.5, "away_xg": 1.2, "home_form": "WDWWL", "away_form": "LWDWL", "h2h": 2, "home_inj": "None", "away_inj": "None", "odds_h": f["odds_h"], "odds_d": f["odds_d"], "odds_a": f["odds_a"], "odds_over": 1.75}
+            p = get_ai_prediction(d)
+            msg += f"{f['home']} vs {f['away']} - {p['verdict']}\n"
+        msg += f"More: {BOT_HANDLE} | {BOT_HANDLE_2} | {SUPPORT_HANDLE}\n{DISCLAIMER}"
+        if CHANNEL_ID:
+            send_message(CHANNEL_ID, msg)
+        return {"posted": True, "unique": unique}
+    finally:
+        db.close()
+
+@app.get("/pay")
+async def create_payment(plan: str, uid: str):
+    if not FLW_SECRET:
+        return JSONResponse({"error": "Keys not set"}, status_code=500)
+    amount = 2000 if plan == "weekly" else 5000
+    tx_ref = f"BETMASTER-{uid}-{plan}-{int(time.time())}"
+    payload = {
+        "tx_ref": tx_ref,
+        "amount": amount,
+        "currency": "NGN",
+        "redirect_url": f"https://betmaster-p09f.onrender.com/verify?tx_ref={tx_ref}&uid={uid}&plan={plan}",
+        "customer": {"email": f"{uid}@betmasterpro.com", "name": f"User {uid}"},
+        "customizations": {"title": f"BetMasterPro {plan.upper()}"},
+    }
+    headers = {"Authorization": f"Bearer {FLW_SECRET}"}
+    try:
+        r = requests.post("https://api.flutterwave.com/v3/payments", json=payload, headers=headers, timeout=15).json()
+        if r.get("status") == "success":
+            return RedirectResponse(r["data"]["link"])
+        return JSONResponse(r, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/verify")
+async def verify_payment(tx_ref: str, uid: str, plan: str):
+    headers = {"Authorization": f"Bearer {FLW_SECRET}"}
+    try:
+        r = requests.get(f"https://api.flutterwave.com/v3/transactions?tx_ref={tx_ref}", headers=headers, timeout=15).json()
+        if r.get("status") == "success" and r.get("data"):
+            data = r["data"][0] if isinstance(r["data"], list) else r["data"]
+            if data.get("status") in ["successful", "completed"]:
+                activate_vip(uid, plan)
+                return HTMLResponse(f"<h1>✅ Payment Successful!</h1><p>{plan.upper()} till {date.today()+timedelta(days=7 if 'weekly' in plan else 30)}</p><a href='https://t.me/Betmasterpro_bot'>Go to Bot</a><br>Support: {SUPPORT_HANDLE}")
+        return HTMLResponse(f"<h1>❌ Not confirmed {tx_ref}</h1><a href='/subscribe?uid={uid}'>Retry</a>")
+    except Exception as e:
+        return HTMLResponse(f"Error {e}")
+
+@app.post("/flutterwave-webhook")
+async def flutterwave_webhook(request: Request):
+    try:
+        body = await request.body()
+        if FLW_WEBHOOK_SECRET:
+            signature = request.headers.get("verif-hash", "")
+            if signature!= FLW_WEBHOOK_SECRET:
+                print(f"Hash mismatch")
+        data = json.loads(body)
+        if data.get("event") == "charge.completed" and data.get("data", {}).get("status") == "successful":
+            tx_ref = data["data"].get("tx_ref", "")
+            parts = tx_ref.split("-")
+            if len(parts) >= 3 and parts[0] == "BETMASTER":
+                uid = parts[1]
+                plan = parts[2]
+                activate_vip(uid, plan)
+        return JSONResponse({"status": "ok"})
+    except Exception as e:
+        print(f"Webhook {e}")
+        return JSONResponse({"status": "error"}, status_code=200)
+
+@app.get("/admin/activate")
+async def admin_activate(uid: str, plan: str = "monthly", key: str = ""):
+    if key!= ADMIN_KEY:
+        return HTMLResponse(f"❌ Wrong key. Use?key={ADMIN_KEY}", status_code=403)
+    ok = activate_vip(uid, plan)
+    return HTMLResponse(f"{'✅ Activated' if ok else '❌ Failed'} {uid} {plan} - Support {SUPPORT_HANDLE}")
+
+@app.get("/admin/users")
+async def admin_users(key: str = ""):
+    if key!= ADMIN_KEY:
+        return HTMLResponse("Wrong key", status_code=403)
+    from database import SessionLocal, get_all_users
+    db = SessionLocal()
+    try:
+        users = get_all_users(db)
+        html = f"<h1>Users - Support {SUPPORT_HANDLE}</h1><table border=1><tr><th>ID</th><th>VIP</th><th>Expiry</th><th>Action</th></tr>"
+        for u in users:
+            html += f"<tr><td>{u.user_id}</td><td>{'💎' if u.is_vip else '🆓'}</td><td>{u.vip_expiry}</td><td><a href='/admin/activate?uid={u.user_id}&plan=weekly&key={key}'>Weekly</a> | <a href='/admin/activate?uid={u.user_id}&plan=monthly&key={key}'>Monthly</a></td></tr>"
+        html += "</table>"
+        return HTMLResponse(html)
+    finally:
+        db.close()
+
+@app.get("/subscribe", response_class=HTMLResponse)
+async def subscribe(request: Request):
+    uid = request.query_params.get("uid", "")
+    html = f"""
+    <html><head><title>BetMasterPro VIP</title><meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>body{{font-family:sans-serif;background:#0f172a;color:white;text-align:center;padding:20px}}.card{{background:#1e293b;padding:25px;border-radius:15px;max-width:420px;margin:20px auto}}.btn{{display:block;padding:15px;margin:12px 0;border-radius:10px;text-decoration:none;color:white;font-weight:bold}}.weekly{{background:#22c55e}}.monthly{{background:#3b82f6}}</style></head>
+    <body><h1>💎 BetMasterPro VIP</h1><p>ID: <b>{uid}</b></p>
+    <div class="card"><a class="btn weekly" href="/pay?plan=weekly&uid={uid}">💚 Weekly ₦2,000 - Flutterwave</a>
+    <a class="btn monthly" href="/pay?plan=monthly&uid={uid}">💙 Monthly ₦5,000 - Flutterwave</a>
+    <p>Bank Transfer & Card auto-activate</p><p>Support: {SUPPORT_HANDLE}</p><p>Bot: {BOT_HANDLE} | {BOT_HANDLE_2}</p></div></body></html>
+    """
+    return HTMLResponse(html)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
