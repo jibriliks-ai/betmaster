@@ -1,20 +1,7 @@
 """
 BetMasterPro — Telegram AI Football Prediction Bot
 ==================================================
-
-Production refactor. All original features preserved:
-  • Telegram long-polling (no webhook conflicts)
-  • /start /help /today /fixtures<country> /myplan /subscribe
-  • Inline "Predict Top 5" callback
-  • Free-form "Team A vs Team B" predictions
-  • Free / VIP tier enforcement (2 vs 10 predictions/day)
-  • Flutterwave payments (card + bank transfer)
-  • Flutterwave webhook with signature verification
-  • Morning channel post (05:05 UTC) + personalised DMs
-  • Admin endpoints for user list & manual activation
-
-Author: Refactored for production
-Python: 3.11+
+Production version with diagnostic endpoint.
 """
 from __future__ import annotations
 
@@ -47,26 +34,21 @@ log = logging.getLogger("betmaster")
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Configuration — every value overridable via env
+# Configuration
 # ─────────────────────────────────────────────────────────────────────
 class Config:
-    # Telegram
     BOT_TOKEN: str = (os.getenv("BOT_TOKEN") or "").strip()
     CHANNEL_ID: str = (os.getenv("CHANNEL_ID") or "-1004371407166").strip()
 
-    # Flutterwave
     FLW_SECRET_KEY: str = os.getenv("FLUTTERWAVE_SECRET_KEY", "").strip()
     FLW_WEBHOOK_HASH: str = os.getenv("FLUTTERWAVE_WEBHOOK_SECRET", "").strip()
 
-    # Admin — NO DEFAULT. If empty, admin endpoints are disabled.
     ADMIN_KEY: str = os.getenv("ADMIN_KEY", "").strip()
 
-    # Public URL (used in payment redirects & subscription links)
     PUBLIC_URL: str = os.getenv(
         "PUBLIC_URL", "https://betmaster-p09f.onrender.com"
     ).rstrip("/")
 
-    # Branding / links
     SUPPORT_HANDLE: str = os.getenv("SUPPORT_HANDLE", "@Jibriliks")
     SUPPORT_URL: str = os.getenv("SUPPORT_URL", "https://t.me/Jibriliks")
     BOT_HANDLE: str = os.getenv("BOT_HANDLE", "@Betmasterpro_bot")
@@ -75,22 +57,18 @@ class Config:
         "CHANNEL_LINK", "https://t.me/+IFK0qoDI2B5lYWI0"
     )
 
-    # Business rules
     FREE_DAILY_LIMIT: int = int(os.getenv("FREE_DAILY_LIMIT", "2"))
     VIP_DAILY_LIMIT: int = int(os.getenv("VIP_DAILY_LIMIT", "10"))
     WEEKLY_PRICE_NGN: int = int(os.getenv("WEEKLY_PRICE_NGN", "2000"))
     MONTHLY_PRICE_NGN: int = int(os.getenv("MONTHLY_PRICE_NGN", "5000"))
 
-    # Scheduler — 24h UTC clock
     MORNING_POST_UTC: str = os.getenv("MORNING_POST_UTC", "05:05")
 
-    # Telegram API base
     @classmethod
     def telegram_api(cls) -> str:
         return f"https://api.telegram.org/bot{cls.BOT_TOKEN}"
 
 
-# Normalise channel id (Telegram supergroups must start with -100)
 if Config.CHANNEL_ID and not Config.CHANNEL_ID.startswith("-"):
     Config.CHANNEL_ID = "-100" + Config.CHANNEL_ID.lstrip("-")
 
@@ -101,11 +79,9 @@ DISCLAIMER = (
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Telegram client — with retry, flood control, structured errors
+# Telegram client
 # ─────────────────────────────────────────────────────────────────────
 class TelegramClient:
-    """Thin wrapper around the Telegram Bot API with retry + rate limiting."""
-
     MAX_MESSAGE_LEN = 4096
     SEND_RETRIES = 3
 
@@ -113,7 +89,7 @@ class TelegramClient:
         self.token = token
         self.base = f"https://api.telegram.org/bot{token}" if token else ""
         self._last_send_ts: float = 0.0
-        self._min_gap: float = 0.05  # ~20 msg/sec ceiling
+        self._min_gap: float = 0.05
 
     def _throttle(self) -> None:
         elapsed = time.monotonic() - self._last_send_ts
@@ -154,7 +130,6 @@ class TelegramClient:
                 if r.status_code == 200:
                     return True
 
-                # Flood wait — respect Telegram's retry_after
                 if r.status_code == 429:
                     retry_after = r.json().get("parameters", {}).get(
                         "retry_after", 5
@@ -170,6 +145,18 @@ class TelegramClient:
             except requests.RequestException as exc:
                 log.warning("sendMessage exception (try %s): %s", attempt, exc)
                 time.sleep(1.5 * attempt)
+
+        # Final fallback — retry as plain text (Markdown parse errors)
+        if parse_mode == "Markdown":
+            payload["parse_mode"] = ""
+            try:
+                r = requests.post(
+                    f"{self.base}/sendMessage", json=payload, timeout=15
+                )
+                if r.status_code == 200:
+                    return True
+            except requests.RequestException:
+                pass
         return False
 
     def answer_callback(self, callback_id: str, text: str = "") -> None:
@@ -197,7 +184,7 @@ tg = TelegramClient(Config.BOT_TOKEN)
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Business helpers
+# Helpers
 # ─────────────────────────────────────────────────────────────────────
 def _daily_limit(user) -> int:
     return (
@@ -206,7 +193,6 @@ def _daily_limit(user) -> int:
 
 
 def activate_vip(user_id: int | str, plan: str) -> bool:
-    """Activate or extend VIP for a user. Returns True on success."""
     from database import SessionLocal, get_user
 
     days = 7 if "weekly" in plan.lower() else 30
@@ -245,18 +231,37 @@ def activate_vip(user_id: int | str, plan: str) -> bool:
 # Polling loop
 # ─────────────────────────────────────────────────────────────────────
 def bot_polling_loop(stop_event: threading.Event) -> None:
-    """Long-poll Telegram, dispatching updates until stop_event is set."""
     if not Config.BOT_TOKEN:
         log.error("BOT_TOKEN missing — polling thread not started")
         return
 
-    tg.delete_webhook()
+    try:
+        from database import (
+            SessionLocal, get_user, update_league_history,
+        )
+        log.info("✅ database.py imported OK")
+    except Exception as exc:
+        log.exception("FATAL: database.py failed to import — %s", exc)
+        return
 
-    from database import SessionLocal, get_user, update_league_history
-    from predictor import get_ai_prediction, fetch_fixtures_by_country, fetch_real_fixtures
+    try:
+        from predictor import (
+            get_ai_prediction,
+            fetch_fixtures_by_country,
+            fetch_real_fixtures,
+        )
+        log.info("✅ predictor.py imported OK")
+    except Exception as exc:
+        log.exception("FATAL: predictor.py failed to import — %s", exc)
+        return
+
+    try:
+        tg.delete_webhook()
+    except Exception as exc:
+        log.warning("deleteWebhook failed (continuing anyway): %s", exc)
 
     offset = 0
-    log.info("Polling loop started")
+    log.info("✅ Polling loop started — bot is now listening for messages")
 
     while not stop_event.is_set():
         try:
@@ -271,15 +276,29 @@ def bot_polling_loop(stop_event: threading.Event) -> None:
                 time.sleep(5)
                 continue
 
-            for upd in resp.get("result", []):
+            updates = resp.get("result", [])
+            if updates:
+                log.info("Received %d update(s)", len(updates))
+
+            for upd in updates:
                 offset = upd["update_id"] + 1
                 try:
                     if "callback_query" in upd:
-                        _handle_callback(upd, get_ai_prediction, fetch_real_fixtures, update_league_history)
+                        _handle_callback(
+                            upd, get_ai_prediction,
+                            fetch_real_fixtures, update_league_history,
+                        )
                     elif "message" in upd:
-                        _handle_message(upd, get_ai_prediction, fetch_fixtures_by_country, fetch_real_fixtures, update_league_history)
+                        _handle_message(
+                            upd, get_ai_prediction,
+                            fetch_fixtures_by_country,
+                            fetch_real_fixtures,
+                            update_league_history,
+                        )
                 except Exception:
-                    log.exception("Handler failed for update %s", upd.get("update_id"))
+                    log.exception(
+                        "Handler failed for update %s", upd.get("update_id")
+                    )
         except requests.RequestException as exc:
             log.warning("Polling network error: %s", exc)
             time.sleep(5)
@@ -294,7 +313,6 @@ def bot_polling_loop(stop_event: threading.Event) -> None:
 # Update handlers
 # ─────────────────────────────────────────────────────────────────────
 def _handle_callback(upd, get_ai_prediction, fetch_real_fixtures, update_league_history):
-    """Handle inline keyboard callbacks (currently only predict_top5)."""
     from database import SessionLocal, get_user
 
     cq = upd["callback_query"]
@@ -383,7 +401,6 @@ def _handle_callback(upd, get_ai_prediction, fetch_real_fixtures, update_league_
 
 
 def _handle_message(upd, get_ai_prediction, fetch_fixtures_by_country, fetch_real_fixtures, update_league_history):
-    """Route a private text message to the correct command handler."""
     from database import SessionLocal, get_user
 
     msg = upd.get("message") or {}
@@ -401,7 +418,6 @@ def _handle_message(upd, get_ai_prediction, fetch_fixtures_by_country, fetch_rea
         user = get_user(db, user_id, username)
         limit = _daily_limit(user)
 
-        # ── /start ────────────────────────────────────────────────
         if low.startswith("/start"):
             tg.send(
                 chat_id,
@@ -424,7 +440,6 @@ def _handle_message(upd, get_ai_prediction, fetch_fixtures_by_country, fetch_rea
                 f"Support: {Config.SUPPORT_HANDLE}",
             )
 
-        # ── /help ─────────────────────────────────────────────────
         elif low.startswith("/help"):
             tg.send(
                 chat_id,
@@ -442,7 +457,6 @@ def _handle_message(upd, get_ai_prediction, fetch_fixtures_by_country, fetch_rea
                 f"We reply within 2 hours!",
             )
 
-        # ── /fixtures<country> ────────────────────────────────────
         elif low.startswith("/fixtures"):
             country_raw = low.replace("/fixtures", "").strip().split()
             country_raw = country_raw[0] if country_raw else "england"
@@ -478,8 +492,10 @@ def _handle_message(upd, get_ai_prediction, fetch_fixtures_by_country, fetch_rea
                 )
                 return
 
-            lines = [f"📅 *{country_raw.upper()} FIXTURES TODAY — "
-                     f"{datetime.now().strftime('%d %B %Y')}* — LIVE\n"]
+            lines = [
+                f"📅 *{country_raw.upper()} FIXTURES TODAY — "
+                f"{datetime.now().strftime('%d %B %Y')}* — LIVE\n"
+            ]
             for i, f in enumerate(fixtures, 1):
                 lines.append(
                     f"{i}. *{f['home']} vs {f['away']}*\n"
@@ -495,7 +511,6 @@ def _handle_message(upd, get_ai_prediction, fetch_fixtures_by_country, fetch_rea
             }
             tg.send(chat_id, "\n".join(lines), reply_markup=keyboard)
 
-        # ── /myplan ───────────────────────────────────────────────
         elif low.startswith("/myplan"):
             plan_txt = (
                 f"💎 VIP till {user.vip_expiry}"
@@ -514,7 +529,6 @@ def _handle_message(upd, get_ai_prediction, fetch_fixtures_by_country, fetch_rea
                 f"Support: {Config.SUPPORT_HANDLE}",
             )
 
-        # ── /subscribe ────────────────────────────────────────────
         elif low.startswith("/subscribe"):
             tg.send(
                 chat_id,
@@ -529,7 +543,6 @@ def _handle_message(upd, get_ai_prediction, fetch_fixtures_by_country, fetch_rea
                 f"Support: {Config.SUPPORT_HANDLE}",
             )
 
-        # ── /today ────────────────────────────────────────────────
         elif low.startswith("/today"):
             if user.daily_count >= limit:
                 tg.send(
@@ -585,7 +598,6 @@ def _handle_message(upd, get_ai_prediction, fetch_fixtures_by_country, fetch_rea
             }
             tg.send(chat_id, body, reply_markup=keyboard)
 
-        # ── Free-form "Team A vs Team B" ──────────────────────────
         elif "vs" in low and 5 < len(text) < 100:
             if user.daily_count >= limit:
                 tg.send(
@@ -649,7 +661,6 @@ def _handle_message(upd, get_ai_prediction, fetch_fixtures_by_country, fetch_rea
                 f"🆘 Support: {Config.SUPPORT_HANDLE}",
             )
 
-        # ── Fallback ──────────────────────────────────────────────
         else:
             tg.send(
                 chat_id,
@@ -669,10 +680,9 @@ def _handle_message(upd, get_ai_prediction, fetch_fixtures_by_country, fetch_rea
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Channel + DM scheduler
+# Scheduler
 # ─────────────────────────────────────────────────────────────────────
 def channel_scheduler(stop_event: threading.Event) -> None:
-    """Post to channel + DM users once per day at MORNING_POST_UTC."""
     from database import (
         SessionLocal, get_all_users, is_already_posted, mark_as_posted,
     )
@@ -688,12 +698,12 @@ def channel_scheduler(stop_event: threading.Event) -> None:
             today = now_utc.strftime("%Y-%m-%d")
 
             if hm == Config.MORNING_POST_UTC and f"{today}-morning" not in posted:
-                _run_morning_job(today, get_ai_prediction, fetch_real_fixtures,
-                                 SessionLocal, get_all_users,
-                                 is_already_posted, mark_as_posted)
+                _run_morning_job(
+                    today, get_ai_prediction, fetch_real_fixtures,
+                    SessionLocal, get_all_users,
+                    is_already_posted, mark_as_posted,
+                )
                 posted.add(f"{today}-morning")
-
-                # prune old keys to keep memory bounded
                 posted = {k for k in posted if k.startswith(today)}
         except Exception:
             log.exception("Scheduler iteration failed")
@@ -704,7 +714,6 @@ def channel_scheduler(stop_event: threading.Event) -> None:
 def _run_morning_job(today, get_ai_prediction, fetch_real_fixtures,
                      SessionLocal, get_all_users,
                      is_already_posted, mark_as_posted):
-    """Execute the morning channel post + personalised DMs."""
     db = SessionLocal()
     try:
         fixtures = fetch_real_fixtures(days_ahead=1, limit=15)
@@ -744,7 +753,6 @@ def _run_morning_job(today, get_ai_prediction, fetch_real_fixtures,
         if Config.CHANNEL_ID:
             tg.send(Config.CHANNEL_ID, msg)
 
-        # Personalised morning DMs
         for u in get_all_users(db):
             try:
                 fav = u.favorite_league if u.is_vip else None
@@ -789,7 +797,7 @@ def _run_morning_job(today, get_ai_prediction, fetch_real_fixtures,
 
 
 # ─────────────────────────────────────────────────────────────────────
-# FastAPI app with proper lifespan (no threads at import time)
+# FastAPI app with lifespan
 # ─────────────────────────────────────────────────────────────────────
 _stop_event = threading.Event()
 _threads: list[threading.Thread] = []
@@ -803,7 +811,7 @@ async def lifespan(app: FastAPI):
     log.info("  Channel:  %s", Config.CHANNEL_ID)
     log.info("  Support:  %s", Config.SUPPORT_HANDLE)
     log.info("  Public:   %s", Config.PUBLIC_URL)
-    log.info("  Admin:    %s", "enabled" if Config.ADMIN_KEY else "DISABLED (no ADMIN_KEY)")
+    log.info("  Admin:    %s", "enabled" if Config.ADMIN_KEY else "DISABLED")
     log.info("=" * 62)
 
     for target in (bot_polling_loop, channel_scheduler):
@@ -823,7 +831,7 @@ app = FastAPI(title="BetMasterPro", lifespan=lifespan)
 
 
 # ─────────────────────────────────────────────────────────────────────
-# System / health endpoints
+# System endpoints
 # ─────────────────────────────────────────────────────────────────────
 @app.get("/")
 async def home():
@@ -855,8 +863,49 @@ async def health():
     return {"ok": True, "time_utc": datetime.now(timezone.utc).isoformat()}
 
 
+@app.get("/diagnose")
+async def diagnose():
+    """Full health check — confirms threads, imports, and Telegram reachability."""
+    results = {
+        "bot_token_set": bool(Config.BOT_TOKEN),
+        "channel_id": Config.CHANNEL_ID,
+        "database_url_set": bool(os.getenv("DATABASE_URL")),
+        "threads": [{"name": t.name, "alive": t.is_alive()} for t in _threads],
+        "imports": {},
+        "telegram": None,
+        "webhook": None,
+    }
+
+    for mod in ("database", "predictor"):
+        try:
+            __import__(mod)
+            results["imports"][mod] = "OK"
+        except Exception as exc:
+            results["imports"][mod] = f"FAIL: {type(exc).__name__}: {exc}"
+
+    try:
+        r = requests.get(f"{tg.base}/getMe", timeout=8).json()
+        results["telegram"] = {
+            "ok": r.get("ok", False),
+            "username": r.get("result", {}).get("username"),
+        }
+    except Exception as exc:
+        results["telegram"] = f"Error: {exc}"
+
+    try:
+        r = requests.get(f"{tg.base}/getWebhookInfo", timeout=8).json()
+        results["webhook"] = {
+            "url": r.get("result", {}).get("url", ""),
+            "pending": r.get("result", {}).get("pending_update_count", 0),
+        }
+    except Exception as exc:
+        results["webhook"] = f"Error: {exc}"
+
+    return results
+
+
 # ─────────────────────────────────────────────────────────────────────
-# Payment endpoints
+# Payments
 # ─────────────────────────────────────────────────────────────────────
 def _verify_admin(key: Optional[str]) -> None:
     if not Config.ADMIN_KEY:
@@ -915,7 +964,9 @@ async def pay(plan: str, uid: str):
 @app.get("/verify")
 async def verify(tx_ref: str, uid: str, plan: str, amount: int = 0):
     if not Config.FLW_SECRET_KEY:
-        return HTMLResponse("<h1>Payment verification unavailable</h1>", status_code=500)
+        return HTMLResponse(
+            "<h1>Payment verification unavailable</h1>", status_code=500
+        )
 
     headers = {"Authorization": f"Bearer {Config.FLW_SECRET_KEY}"}
     try:
@@ -933,17 +984,18 @@ async def verify(tx_ref: str, uid: str, plan: str, amount: int = 0):
                 else Config.MONTHLY_PRICE_NGN
             )
 
-            # SECURITY: verify amount + currency before activating
             if data.get("status") in {"successful", "completed"} \
                     and paid >= expected and data.get("currency") == "NGN":
                 activate_vip(uid, plan)
-                expiry = date.today() + timedelta(days=7 if plan == "weekly" else 30)
+                expiry = date.today() + timedelta(
+                    days=7 if plan == "weekly" else 30
+                )
                 return HTMLResponse(
                     f"<html><body style='text-align:center;padding:40px;"
                     f"font-family:sans-serif'>"
                     f"<h1>✅ Payment Successful!</h1>"
-                    f"<p>{plan.upper()} — {Config.VIP_DAILY_LIMIT} predictions/day "
-                    f"till {expiry}</p>"
+                    f"<p>{plan.upper()} — {Config.VIP_DAILY_LIMIT} "
+                    f"predictions/day till {expiry}</p>"
                     f"<a href='{Config.BOT_LINK}' style='background:green;"
                     f"color:white;padding:15px 30px;text-decoration:none;"
                     f"border-radius:10px'>Go to Bot {Config.BOT_HANDLE}</a>"
@@ -968,10 +1020,6 @@ async def flutterwave_webhook(
     request: Request,
     verif_hash: Optional[str] = Header(None, alias="verif-hash"),
 ):
-    """
-    Flutterwave webhook. CRITICAL: signature is REQUIRED when a hash is
-    configured. Mismatched signatures are rejected.
-    """
     if Config.FLW_WEBHOOK_HASH:
         if verif_hash != Config.FLW_WEBHOOK_HASH:
             log.warning("Webhook rejected — bad verif-hash")
@@ -993,12 +1041,11 @@ async def flutterwave_webhook(
         return JSONResponse({"status": "ok"})
     except Exception:
         log.exception("Webhook processing error")
-        # Always 200 to prevent Flutterwave retry storms, but log it
         return JSONResponse({"status": "error"}, status_code=200)
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Admin endpoints
+# Admin
 # ─────────────────────────────────────────────────────────────────────
 @app.get("/admin/activate")
 async def admin_activate(
@@ -1062,7 +1109,6 @@ async def post_now(
     key: Optional[str] = None,
     x_admin_key: Optional[str] = Header(None),
 ):
-    """Manually trigger a channel post. Admin-protected."""
     _verify_admin(x_admin_key or key)
 
     from database import (
@@ -1110,7 +1156,7 @@ async def post_now(
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Subscribe landing page
+# Subscribe landing
 # ─────────────────────────────────────────────────────────────────────
 @app.get("/subscribe", response_class=HTMLResponse)
 async def subscribe(request: Request):
