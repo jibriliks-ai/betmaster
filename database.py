@@ -17,57 +17,54 @@ class User(Base):
     user_id = Column(Integer, primary_key=True)
     username = Column(String, default="")
     daily_count = Column(Integer, default=0)
-    last_reset = Column(String, default=str(date.today())) # YYYY-MM-DD
+    last_reset = Column(String, default=str(date.today()))
     total_chats = Column(Integer, default=0)
     is_vip = Column(Boolean, default=False)
-    vip_expiry = Column(String, default="") # YYYY-MM-DD
+    vip_expiry = Column(String, default="")
     favorite_league = Column(String, default="Premier League")
-    league_history = Column(Text, default="{}") # json {"Premier League": 5}
+    league_history = Column(Text, default="{}")
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class PostedHistory(Base):
+    __tablename__ = "posted_history"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fixture_hash = Column(String, unique=True) # e.g. Arsenal-Chelsea-2025-09-25
+    posted_date = Column(String, default=str(date.today()))
 
 Base.metadata.create_all(bind=engine)
 
 def get_user(db, user_id, username=""):
     user = db.query(User).filter(User.user_id == user_id).first()
     today_str = str(date.today())
-
     if not user:
         user = User(user_id=user_id, username=username, last_reset=today_str)
-        db.add(user)
-        db.commit()
-        db.refresh(user)
+        db.add(user); db.commit(); db.refresh(user)
         return user
-
-    # Reset daily count if new day
     if user.last_reset!= today_str:
-        user.daily_count = 0
-        user.last_reset = today_str
-        db.commit()
-
-    # Check VIP expiry
-    if user.is_vip and user.vip_expiry:
-        if user.vip_expiry < today_str:
-            user.is_vip = False
-            db.commit()
-
+        user.daily_count = 0; user.last_reset = today_str; db.commit()
+    if user.is_vip and user.vip_expiry and user.vip_expiry < today_str:
+        user.is_vip = False; db.commit()
     if username and user.username!= username:
-        user.username = username
-        db.commit()
-
+        user.username = username; db.commit()
     return user
 
 def update_league_history(db, user, league):
-    try:
-        hist = json.loads(user.league_history or "{}")
-    except:
-        hist = {}
+    try: hist = json.loads(user.league_history or "{}")
+    except: hist = {}
     hist[league] = hist.get(league, 0) + 1
     user.league_history = json.dumps(hist)
-    # Set favorite = most chatted league
-    if hist:
-        user.favorite_league = max(hist, key=hist.get)
-    user.total_chats += 1
-    db.commit()
+    if hist: user.favorite_league = max(hist, key=hist.get)
+    user.total_chats += 1; db.commit()
+
+def is_already_posted(db, fixture_hash):
+    exists = db.query(PostedHistory).filter(PostedHistory.fixture_hash == fixture_hash).first()
+    return bool(exists)
+
+def mark_as_posted(db, fixture_hash):
+    try:
+        db.add(PostedHistory(fixture_hash=fixture_hash, posted_date=str(date.today())))
+        db.commit()
+    except: db.rollback()
 
 def get_all_users(db):
     return db.query(User).all()
