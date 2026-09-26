@@ -60,5 +60,3 @@ def is_already_posted(db, fixture_hash):
 def mark_as_posted(db, fixture_hash):
     try: db.add(PostedHistory(fixture_hash=fixture_hash, posted_date=str(date.today()))); db.commit()
     except: db.rollback()
-def get_all_users(db):
-    return db.query(User).all()
