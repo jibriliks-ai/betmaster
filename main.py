@@ -223,4 +223,46 @@ async def pay(plan:str, uid:str):
     if not FLW_SECRET: return JSONResponse({"error":"Keys not set"}, status_code=500)
     amount=2000 if plan=="weekly" else 5000
     tx_ref=f"BETMASTER-{uid}-{plan}-{int(time.time())}"
-    payload={"tx_ref":tx_ref,"amount":amount,"currency":"NGN","redirect_url":f"{RENDER_URL}/verify?tx_ref={tx_ref}&uid={uid}&plan={plan}","customer":{"email":f"{uid}@betmasterpro.com","
+    payload={"tx_ref":tx_ref,"amount":amount,"currency":"NGN","redirect_url":f"{RENDER_URL}/verify?tx_ref={tx_ref}&uid={uid}&plan={plan}","customer":{"email":f"{uid}@betmasterpro.com","name":f"User {uid}"},"customizations":{"title":f"BetMasterPro {plan.upper()} Professional"}}
+    headers={"Authorization":f"Bearer {FLW_SECRET}"}
+    try:
+        r=requests.post("https://api.flutterwave.com/v3/payments", json=payload, headers=headers, timeout=15).json()
+        if r.get("status")=="success": return RedirectResponse(r["data"]["link"])
+        return JSONResponse(r, status_code=400)
+    except Exception as e: return JSONResponse({"error":str(e)}, status_code=500)
+
+@app.get("/verify")
+async def verify(tx_ref:str, uid:str, plan:str):
+    headers={"Authorization":f"Bearer {FLW_SECRET}"}
+    try:
+        r=requests.get(f"https://api.flutterwave.com/v3/transactions?tx_ref={tx_ref}", headers=headers, timeout=15).json()
+        if r.get("status")=="success" and r.get("data"):
+            data=r["data"][0] if isinstance(r["data"], list) else r["data"]
+            if data.get("status") in ["successful","completed"]:
+                activate_vip(uid, plan)
+                return HTMLResponse(f"<h1>✅ OK {plan.upper()} 10/day + 500K Betslip till {date.today()+timedelta(days=7 if 'weekly' in plan else 30)}</h1><a href='{BOT_LINK}'>Go to Bot - Professional Senior Bot</a>")
+        return HTMLResponse(f"<h1>Not confirmed {tx_ref}</h1><a href='/subscribe?uid={uid}'>Retry</a>")
+    except Exception as e: return HTMLResponse(f"Error {e}")
+
+@app.post("/flutterwave-webhook")
+async def flutterwave_webhook(request:Request):
+    try:
+        body=await request.body(); data=json.loads(body)
+        if data.get("event")=="charge.completed" and data.get("data",{}).get("status")=="successful":
+            tx_ref=data["data"].get("tx_ref",""); parts=tx_ref.split("-")
+            if len(parts)>=3 and parts[0]=="BETMASTER": activate_vip(parts[1], parts[2])
+        return JSONResponse({"status":"ok"})
+    except Exception as e: print(f"Webhook {e}"); return JSONResponse({"status":"error"}, status_code=200)
+
+@app.get("/admin/activate")
+async def admin_activate(uid:str, plan:str="monthly", key:str=""):
+    if key!=ADMIN_KEY: return HTMLResponse("Wrong key", status_code=403)
+    ok=activate_vip(uid, plan); return HTMLResponse(f"{'Activated' if ok else 'Failed'} {uid} {plan} - {BOT_LINK}")
+
+@app.get("/subscribe", response_class=HTMLResponse)
+async def subscribe(request:Request):
+    uid=request.query_params.get("uid","")
+    return HTMLResponse(f"<html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>body{{background:#0f172a;color:white;text-align:center;padding:20px;font-family:sans-serif}}.card{{background:#1e293b;padding:25px;border-radius:15px;max-width:420px;margin:20px auto}}.btn{{display:block;padding:15px;margin:12px 0;border-radius:10px;text-decoration:none;color:white;font-weight:bold}}.weekly{{background:#22c55e}}.monthly{{background:#3b82f6}}</style></head><body><h1>BetMasterPro VIP Professional</h1><p>ID: {uid}</p><div class='card'><p>✅ PROFESSIONAL SENIOR BOT<br>FREE 2/day<br>VIP 10/day + 500K BETSLIP EXTRA<br>Senior Nations League + Africa Friendlies<br>No U21 - Senior only<br>Stake N1000 WIN N500K</p><a class='btn weekly' href='/pay?plan=weekly&uid={uid}'>Weekly N2,000 - 500K Betslip</a><a class='btn monthly' href='/pay?plan=monthly&uid={uid}'>Monthly N5,000 - Best Value</a><p>Bot: {BOT_LINK}</p></div></body></html>")
+
+if __name__=="__main__":
+    import uvicorn; uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT","10000")))
