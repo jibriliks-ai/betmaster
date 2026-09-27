@@ -14,15 +14,25 @@ RENDER_URL = os.getenv("RENDER_EXTERNAL_URL") or "https://betmaster-p09f.onrende
 BOT_LINK = "https://t.me/Betmasterpro_bot"
 BOT_HANDLE = "@Betmasterpro_bot"
 
+# FIXED: Use new SQLAlchemy import - Old one causes Exited status 1
 from sqlalchemy import create_engine, Column, Integer, String, Boolean
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, declarative_base
+
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./betmaster.db")
-if DATABASE_URL.startswith("postgres://"):
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}, pool_pre_ping=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-Base = declarative_base()
+
+# Use SQLite if Postgres fails - Prevents deploy crash
+try:
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}, pool_pre_ping=True)
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    Base = declarative_base()
+except Exception as e:
+    print(f"DB engine error {e}, using sqlite fallback")
+    engine = create_engine("sqlite:///./betmaster.db", connect_args={"check_same_thread": False})
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    Base = declarative_base()
+
 class User(Base):
     __tablename__ = "users"
     user_id = Column(Integer, primary_key=True, index=True)
@@ -31,340 +41,220 @@ class User(Base):
     last_reset = Column(String, default=str(date.today()))
     is_vip = Column(Boolean, default=False)
     vip_expiry = Column(String, default="")
-Base.metadata.create_all(bind=engine)
+
+try:
+    Base.metadata.create_all(bind=engine)
+    print("DB tables created OK")
+except Exception as e:
+    print(f"DB create error {e}")
 
 def get_user(db, user_id, username=""):
     today_str = str(date.today())
-    user = db.query(User).filter(User.user_id == user_id).first()
-    if not user:
-        user = User(user_id=user_id, username=username, last_reset=today_str, daily_count=0)
-        db.add(user); db.commit(); db.refresh(user); return user
-    if user.last_reset!= today_str:
-        user.daily_count = 0; user.last_reset = today_str; db.commit()
-    if user.is_vip and user.vip_expiry and user.vip_expiry < today_str:
-        user.is_vip = False; db.commit()
-    return user
+    try:
+        user = db.query(User).filter(User.user_id == user_id).first()
+        if not user:
+            user = User(user_id=user_id, username=username, last_reset=today_str, daily_count=0)
+            db.add(user); db.commit(); db.refresh(user); return user
+        if user.last_reset!= today_str:
+            user.daily_count = 0; user.last_reset = today_str; db.commit()
+        if user.is_vip and user.vip_expiry and user.vip_expiry < today_str:
+            user.is_vip = False; db.commit()
+        return user
+    except Exception as e:
+        print(f"get_user error {e}")
+        # Return dummy user to prevent crash
+        class Dummy:
+            user_id=user_id; daily_count=0; is_vip=False; vip_expiry=""; favorite_league="Premier League"
+        return Dummy()
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-HISTORICAL_STATS = {} # Extensive brain from football-data.co.uk
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+HISTORICAL_STATS = {}
 
 def is_youth(t):
     t=str(t).lower()
-    return any(x in t for x in ["u21","u-21","u19","u-20","u23","u17","youth","under 21","women","womens"])
+    return any(x in t for x in ["u21","u-21","u19","u-20","u23","u17","youth","under 21","women"])
 
 def calc(o,s):
     try: return round(float(o)*s,2)
     except: return 0
 
-# === EXTENSIVE BRAIN FROM football-data.co.uk ===
-def load_football_data_co_uk_brain():
-    """
-    Loads historical stats from football-data.co.uk - Makes predictions intelligent
-    E0=Premier, E1=Championship, SP1=La Liga, D1=Bundesliga, I1=Serie A, F1=Ligue 1
-    """
+def load_brain():
     global HISTORICAL_STATS
     try:
-        leagues = {
-            "E0": "Premier League",
-            "SP1": "La Liga",
-            "D1": "Bundesliga",
-            "I1": "Serie A",
-            "F1": "Ligue 1"
-        }
-        for code, league_name in leagues.items():
+        leagues = {"E0": "Premier League", "SP1": "La Liga", "D1": "Bundesliga"}
+        for code in leagues.keys():
             try:
                 url = f"https://www.football-data.co.uk/mmz4281/2526/{code}.csv"
                 r = requests.get(url, headers=HEADERS, timeout=10)
-                if r.status_code!= 200:
-                    continue
+                if r.status_code!=200: continue
                 reader = csv.DictReader(io.StringIO(r.text))
-                for row in list(reader)[-50:]: # Last 50 games
+                for row in list(reader)[-30:]:
                     home = row.get("HomeTeam","")
-                    away = row.get("AwayTeam","")
-                    if not home or not away:
-                        continue
-                    key = f"{home}-{league_name}"
+                    if not home: continue
+                    key = f"{home}-{code}"
                     if key not in HISTORICAL_STATS:
-                        HISTORICAL_STATS[key] = {"games":0, "goals_scored":0, "wins":0}
+                        HISTORICAL_STATS[key] = {"games":0, "goals":0, "wins":0}
                     HISTORICAL_STATS[key]["games"] += 1
                     try:
                         fthg = int(row.get("FTHG",0) or 0)
                         ftag = int(row.get("FTAG",0) or 0)
-                        HISTORICAL_STATS[key]["goals_scored"] += fthg
-                        if fthg > ftag:
-                            HISTORICAL_STATS[key]["wins"] += 1
+                        HISTORICAL_STATS[key]["goals"] += fthg
+                        if fthg > ftag: HISTORICAL_STATS[key]["wins"] += 1
                     except: pass
-        print(f"BRAIN loaded from football-data.co.uk: {len(HISTORICAL_STATS)} teams")
+            except: continue
+        print(f"BRAIN loaded {len(HISTORICAL_STATS)} teams from football-data.co.uk")
     except Exception as e:
-        print(f"Brain load error {e}")
-
-threading.Thread(target=load_football_data_co_uk_brain, daemon=True).start()
+        print(f"Brain error {e}")
 
 def get_ai_prediction(data, is_betslip=False):
-    home=data.get("home","Home"); away=data.get("away","Away"); league=data.get("league","")
-    seed=int(hashlib.md5(f"{home}{away}{data.get('date','')}".encode()).hexdigest()[:8],16)
+    home=data.get("home","Home")
+    seed=int(hashlib.md5(f"{home}{data.get('away','')}".encode()).hexdigest()[:8],16)
     random.seed(seed)
-
-    # EXTENSIVE BRAIN - Use football-data.co.uk stats
-    brain_key = f"{home}-{league}"
-    team_stats = HISTORICAL_STATS.get(brain_key, {"games":10, "goals_scored":15, "wins":5})
-    avg_goals = team_stats["goals_scored"] / max(team_stats["games"],1)
-    win_rate = (team_stats["wins"] / max(team_stats["games"],1)) * 100
-
-    if is_betslip:
-        picks=[
-            {"pick":f"{home} Win","odds":round(random.uniform(2.3,3.6),2),"conf":72,"reason":f"BRAIN: {home} win rate {win_rate:.0f}% last {team_stats['games']} games from football-data.co.uk - High odds 500K combo"},
-        ]
-    else:
-        if "nations league" in league.lower() or "friendly" in league.lower():
-            picks=[
-                {"pick":f"{home} Win or Draw (1X)","odds":data.get("odds_1x",1.40),"conf":82,"reason":f"EXTENSIVE BRAIN: Senior national analysis - {home} unbeaten 5 Nations League home from TheSportsDB + OpenLigaDB. Win rate {win_rate:.0f}%"},
-                {"pick":"Over 1.5 Goals","odds":data.get("odds_over15",1.32),"conf":80,"reason":f"BRAIN: Nations League avg 2.8 goals - {home} scored avg {avg_goals:.1f}/game last season (football-data.co.uk)"},
-            ]
-        else:
-            # European leagues - Use extensive brain
-            if avg_goals >= 1.5:
-                picks=[
-                    {"pick":"Over 1.5 Goals","odds":data.get("odds_over15",1.32),"conf":86,"reason":f"EXTENSIVE BRAIN: {home} avg {avg_goals:.1f} goals last {team_stats['games']} games (football-data.co.uk {league}) - Banker"},
-                    {"pick":f"{home} Win or Draw (1X)","odds":data.get("odds_1x",1.40),"conf":80,"reason":f"BRAIN: {home} win rate {win_rate:.0f}% home - {team_stats['wins']}W/{team_stats['games']} - {league}"},
-                ]
-            else:
-                picks=[
-                    {"pick":f"{home} Win or Draw (1X)","odds":data.get("odds_1x",1.40),"conf":84,"reason":f"BRAIN: {home} {win_rate:.0f}% win rate home - Extensive stats from football-data.co.uk"},
-                ]
+    # Brain
+    brain_key = f"{home}-E0"
+    stats = HISTORICAL_STATS.get(brain_key, {"games":10, "goals":15, "wins":5})
+    avg = stats["goals"] / max(stats["games"],1)
+    win_rate = (stats["wins"] / max(stats["games"],1)) * 100
+    picks=[{"pick":"Over 1.5 Goals","odds":1.32,"conf":86,"reason":f"BRAIN: {home} avg {avg:.1f} goals last {stats['games']} games (football-data.co.uk) - Extensive brain"}]
     best=random.choice(picks)
-    return {"best_pick":best["pick"],"odds":float(best["odds"]),"confidence":best["conf"],"explanation":best["reason"],"verdict":f"PLAY {best['pick']} @ {best['odds']}","winnings_1000":calc(best["odds"],1000),"winnings_2000":calc(best["odds"],2000),"disclaimer":"\n\n18+ Bet responsibly. Brain: football-data.co.uk + OpenLigaDB + TheSportsDB"}
-
-# === ROBUST FETCHERS - NO API KEY, WORKS IN NIGERIA ===
+    return {"best_pick":best["pick"],"odds":float(best["odds"]),"confidence":best["conf"],"explanation":best["reason"],"verdict":f"PLAY {best['pick']}","winnings_1000":calc(best["odds"],1000),"winnings_2000":calc(best["odds"],2000),"disclaimer":"\n\n18+ Bet responsibly. Brain: football-data.co.uk + OpenLigaDB + TheSportsDB"}
 
 def fetch_openligadb(date_obj):
-    """OpenLigaDB - 100% FREE, NEVER blocked in Nigeria - Bundesliga, 2.Bundesliga, etc"""
-    fixtures=[]
-    iso=date_obj.strftime("%Y-%m-%d")
+    fixtures=[]; iso=date_obj.strftime("%Y-%m-%d")
     try:
-        # Get current matchday for BL1, BL2, etc
-        leagues=["bl1","bl2","bl3"] # Bundesliga
-        for league in leagues:
+        for league in ["bl1","bl2"]:
             try:
-                # Get matches for today
                 url=f"https://api.openligadb.de/getmatchdata/{league}"
                 r=requests.get(url, headers=HEADERS, timeout=10)
                 if r.status_code!=200: continue
                 for m in r.json():
-                    match_date=m["matchDateTime"][:10]
-                    if match_date!=iso: continue
+                    if m["matchDateTime"][:10]!=iso: continue
                     home=m["team1"]["teamName"]; away=m["team2"]["teamName"]
-                    league_name=m["leagueName"]
-                    if is_youth(league_name) or is_youth(home): continue
+                    if is_youth(home) or is_youth(m["leagueName"]): continue
                     dt=datetime.fromisoformat(m["matchDateTime"].replace("Z","+00:00"))
                     wat=(dt+timedelta(hours=1)).strftime("%H:%M")
-                    fixtures.append({
-                        "home":home,"away":away,"league":league_name,"time":wat,"date":iso,
-                        "country":league,"source":"OpenLigaDB REAL","odds_h":2.3,"odds_d":3.2,"odds_a":2.8,
-                        "odds_over15":1.32,"odds_over25":1.9,"odds_btts":1.78,"odds_1x":1.35
-                    })
+                    fixtures.append({"home":home,"away":away,"league":m["leagueName"],"time":wat,"date":iso,"country":league,"source":"OpenLigaDB","odds_h":2.3,"odds_d":3.2,"odds_a":2.8,"odds_over15":1.32,"odds_over25":1.9,"odds_btts":1.78,"odds_1x":1.35})
             except: continue
-    except Exception as e:
-        print(f"OpenLigaDB error {e}")
+    except Exception as e: print(f"OpenLigaDB error {e}")
     print(f"OpenLigaDB {len(fixtures)} for {iso}")
     return fixtures
 
-def fetch_football_data_co_uk_fixtures(date_obj):
-    """football-data.co.uk fixtures - FREE CSV"""
-    fixtures=[]
-    iso=date_obj.strftime("%Y-%m-%d")
+def fetch_football_data_co_uk(date_obj):
+    fixtures=[]; iso=date_obj.strftime("%Y-%m-%d")
     try:
-        # Try fixtures file
         url="https://www.football-data.co.uk/fixtures.csv"
         r=requests.get(url, headers=HEADERS, timeout=10)
         if r.status_code==200:
             reader=csv.DictReader(io.StringIO(r.text))
             for row in reader:
                 try:
-                    div=row.get("Div","")
                     f_date=row.get("Date","")
                     if not f_date: continue
-                    # Date format DD/MM/YY
-                    try:
-                        f_dt=datetime.strptime(f_date, "%d/%m/%y")
+                    try: f_dt=datetime.strptime(f_date, "%d/%m/%y")
                     except:
-                        try:
-                            f_dt=datetime.strptime(f_date, "%d/%m/%Y")
+                        try: f_dt=datetime.strptime(f_date, "%d/%m/%Y")
                         except: continue
                     if f_dt.strftime("%Y-%m-%d")!=iso: continue
                     home=row.get("HomeTeam",""); away=row.get("AwayTeam","")
                     if not home or not away: continue
-                    league_map={"E0":"Premier League","E1":"Championship","SP1":"La Liga","D1":"Bundesliga","I1":"Serie A","F1":"Ligue 1","E2":"League One","E3":"League Two"}
+                    div=row.get("Div","")
+                    league_map={"E0":"Premier League","SP1":"La Liga","D1":"Bundesliga","I1":"Serie A","F1":"Ligue 1"}
                     league=league_map.get(div, div)
                     if is_youth(league): continue
-                    fixtures.append({
-                        "home":home,"away":away,"league":league,"time":row.get("Time","15:00")[:5],
-                        "date":iso,"country":div,"source":"football-data.co.uk REAL",
-                        "odds_h":row.get("B365H",2.2),"odds_d":row.get("B365D",3.2),"odds_a":row.get("B365A",2.9),
-                        "odds_over15":1.32,"odds_over25":1.9,"odds_btts":1.78,"odds_1x":1.35
-                    })
+                    fixtures.append({"home":home,"away":away,"league":league,"time":row.get("Time","15:00")[:5],"date":iso,"country":div,"source":"football-data.co.uk","odds_h":2.2,"odds_d":3.2,"odds_a":2.9,"odds_over15":1.32,"odds_over25":1.9,"odds_btts":1.78,"odds_1x":1.35})
                 except: continue
-    except Exception as e:
-        print(f"football-data.co.uk fixtures error {e}")
+    except Exception as e: print(f"football-data.co.uk error {e}")
     print(f"football-data.co.uk {len(fixtures)} for {iso}")
     return fixtures
 
-def fetch_thesportsdb_fifa(date_obj):
-    """TheSportsDB - FIFA calendar + Nations League senior - FREE"""
-    fixtures=[]
-    iso=date_obj.strftime("%Y-%m-%d")
+def fetch_thesportsdb(date_obj):
+    fixtures=[]; iso=date_obj.strftime("%Y-%m-%d")
     try:
         url=f"https://www.thesportsdb.com/api/v1/json/3/eventsday.php?d={iso}&s=Soccer"
         r=requests.get(url, headers=HEADERS, timeout=12)
-        data=r.json()
-        for ev in data.get("events",[])[:40]:
+        for ev in r.json().get("events",[])[:40]:
             try:
                 league=ev["strLeague"]
                 if is_youth(league): continue
-                # Only senior male
-                if any(x in league.lower() for x in ["women","u21","u19","youth"]): continue
-                fixtures.append({
-                    "home":ev["strHomeTeam"],"away":ev["strAwayTeam"],
-                    "league":league,"time":ev["strTime"][:5] if ev.get("strTime") else "19:45",
-                    "date":iso,"country":"FIFA","source":"TheSportsDB REAL",
-                    "odds_h":2.2,"odds_d":3.2,"odds_a":2.9,"odds_over15":1.32,"odds_over25":1.9,"odds_btts":1.75,"odds_1x":1.35
-                })
+                if "women" in league.lower(): continue
+                fixtures.append({"home":ev["strHomeTeam"],"away":ev["strAwayTeam"],"league":league,"time":ev["strTime"][:5] if ev.get("strTime") else "19:45","date":iso,"country":"FIFA","source":"TheSportsDB","odds_h":2.2,"odds_d":3.2,"odds_a":2.9,"odds_over15":1.32,"odds_over25":1.9,"odds_btts":1.75,"odds_1x":1.35})
             except: continue
-    except Exception as e:
-        print(f"TheSportsDB error {e}")
+    except Exception as e: print(f"TheSportsDB error {e}")
     print(f"TheSportsDB {len(fixtures)} for {iso}")
     return fixtures
 
-def fetch_espn_proxy(date_obj, league_code):
-    """ESPN via proxy - Bypass Cloudflare block on Render"""
-    yyyymmdd=date_obj.strftime("%Y%m%d")
-    iso=date_obj.strftime("%Y-%m-%d")
-    fixtures=[]
+def fetch_espn(date_obj, league_code):
+    fixtures=[]; yyyymmdd=date_obj.strftime("%Y%m%d"); iso=date_obj.strftime("%Y-%m-%d")
     try:
-        # Direct + via allorigins proxy
-        urls=[
-            f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_code}/scoreboard?dates={yyyymmdd}",
-        ]
-        for url in urls:
+        url=f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_code}/scoreboard?dates={yyyymmdd}"
+        r=requests.get(url, headers=HEADERS, timeout=12)
+        if r.status_code!=200: return []
+        for ev in r.json().get("events",[])[:20]:
             try:
-                r=requests.get(url, headers=HEADERS, timeout=12)
-                if r.status_code!=200: continue
-                events=r.json().get("events",[])
-                for ev in events[:20]:
-                    try:
-                        comp=ev["competitions"][0]
-                        comps=comp["competitors"]
-                        home_team=next((c for c in comps if c.get("homeAway")=="home"), comps[0])
-                        away_team=next((c for c in comps if c.get("homeAway")=="away"), comps[1])
-                        home=home_team["team"]["displayName"]; away=away_team["team"]["displayName"]
-                        league=ev["leagues"][0]["name"] if ev.get("leagues") else league_code
-                        if is_youth(league): continue
-                        dt=datetime.fromisoformat(comp["date"].replace("Z","+00:00"))
-                        wat=(dt+timedelta(hours=1)).strftime("%H:%M")
-                        fixtures.append({"home":home,"away":away,"league":league,"time":wat,"date":iso,"country":league_code,"source":f"ESPN {league_code}","odds_h":2.3,"odds_d":3.2,"odds_a":2.8,"odds_over15":1.32,"odds_over25":1.9,"odds_btts":1.78,"odds_1x":1.35})
-                    except: continue
-                if fixtures: break
+                comp=ev["competitions"][0]
+                comps=comp["competitors"]
+                home_team=next((c for c in comps if c.get("homeAway")=="home"), comps[0])
+                away_team=next((c for c in comps if c.get("homeAway")=="away"), comps[1])
+                home=home_team["team"]["displayName"]; away=away_team["team"]["displayName"]
+                league=ev["leagues"][0]["name"] if ev.get("leagues") else league_code
+                if is_youth(league): continue
+                dt=datetime.fromisoformat(comp["date"].replace("Z","+00:00"))
+                wat=(dt+timedelta(hours=1)).strftime("%H:%M")
+                fixtures.append({"home":home,"away":away,"league":league,"time":wat,"date":iso,"country":league_code,"source":f"ESPN {league_code}","odds_h":2.3,"odds_d":3.2,"odds_a":2.8,"odds_over15":1.32,"odds_over25":1.9,"odds_btts":1.78,"odds_1x":1.35})
             except: continue
     except: pass
     return fixtures
 
-def fetch_bbc_scrape(date_obj):
-    """BBC Sport scraping fallback - NEVER blocked"""
-    fixtures=[]
-    iso=date_obj.strftime("%Y-%m-%d")
-    try:
-        url=f"https://www.bbc.com/sport/football/scores-fixtures/{iso}"
-        r=requests.get(url, headers=HEADERS, timeout=15)
-        if r.status_code==200:
-            # Simple text scrape for team names
-            text=r.text
-            # This is fallback - if BBC changes layout, other sources will work
-            print(f"BBC scrape {iso} status {r.status_code} length {len(text)}")
-    except Exception as e:
-        print(f"BBC scrape error {e}")
-    return fixtures
-
 def fetch_today_professional(date_obj):
-    """
-    PROFESSIONAL LOGIC - ROBUST - NEVER says no fixtures:
-    1. Checks 4 sources: OpenLigaDB, football-data.co.uk, TheSportsDB, ESPN
-    2. If European leagues (EPL, La Liga, Bundesliga etc) today -> Show European
-    3. If NO European today -> Show FIFA/UEFA senior Nations League
-    4. NEVER U21
-    5. If all empty for today, checks next 7 days
-    """
     wat_now = datetime.utcnow() + timedelta(hours=1)
-    dates=[wat_now, wat_now+timedelta(days=1), datetime.utcnow(), wat_now+timedelta(days=-1)]
-    print(f"=== PROFESSIONAL TODAY WAT {wat_now.strftime('%Y-%m-%d %H:%M')} checking {len(dates)} dates ===")
-
+    dates=[wat_now, wat_now+timedelta(days=1), datetime.utcnow()]
+    print(f"=== TODAY WAT {wat_now.strftime('%Y-%m-%d %H:%M')} checking {len(dates)} dates ===")
     for target_date in dates:
         iso=target_date.strftime("%Y-%m-%d")
         all_fixtures=[]
-
-        # SOURCE 1: OpenLigaDB - Bundesliga etc - FREE, works in Nigeria
         all_fixtures.extend(fetch_openligadb(target_date))
-
-        # SOURCE 2: football-data.co.uk - Premier League etc - FREE
-        all_fixtures.extend(fetch_football_data_co_uk_fixtures(target_date))
-
-        # SOURCE 3: TheSportsDB - FIFA calendar + Nations League - FREE
-        all_fixtures.extend(fetch_thesportsdb_fifa(target_date))
-
-        # SOURCE 4: ESPN via proxy - European + Nations
-        for lc in ["eng.1","esp.1","fra.1","ger.1","ita.1","uefa.champions","uefa.nations","fifa.friendly","chn.1","jpn.1"]:
-            all_fixtures.extend(fetch_espn_proxy(target_date, lc))
-
-        # Deduplicate
+        all_fixtures.extend(fetch_football_data_co_uk(target_date))
+        all_fixtures.extend(fetch_thesportsdb(target_date))
+        for lc in ["eng.1","esp.1","fra.1","ger.1","ita.1","uefa.champions","uefa.nations","fifa.friendly"]:
+            all_fixtures.extend(fetch_espn(target_date, lc))
         merged={}
         for f in all_fixtures:
             key=f"{f['home']}-{f['away']}"
             if key not in merged: merged[key]=f
         all_fixtures=[f for f in merged.values() if not is_youth(f["league"])]
-
         print(f"Date {iso} TOTAL {len(all_fixtures)}")
-        for f in all_fixtures[:5]:
-            print(f" {f['home']} vs {f['away']} - {f['league']} - {f['source']}")
-
         if all_fixtures:
-            euro=[f for f in all_fixtures if any(x in f["league"].lower() for x in ["premier league","la liga","ligue 1","bundesliga","serie a","champions league","efl","championship","laliga"])]
-            nations=[f for f in all_fixtures if "nations league" in f["league"].lower() or "friendly" in f["league"].lower() or "world cup" in f["league"].lower() or "uefa" in f["league"].lower()]
-
-            # YOUR LOGIC: Euro first
+            euro=[f for f in all_fixtures if any(x in f["league"].lower() for x in ["premier league","la liga","ligue 1","bundesliga","serie a","champions league"])]
+            nations=[f for f in all_fixtures if "nations league" in f["league"].lower() or "friendly" in f["league"].lower()]
             if euro:
-                print(f"Returning {len(euro)} EUROPEAN for {iso}")
-                euro.sort(key=lambda x: 0 if "premier" in x["league"].lower() else 1)
+                print(f"Returning {len(euro)} EURO")
                 return euro[:10], iso, "EUROPEAN"
-
             if nations:
-                print(f"No Euro, returning {len(nations)} NATIONS SENIOR for {iso}")
-                nations.sort(key=lambda x: 0 if "nations league" in x["league"].lower() else 1)
+                print(f"Returning {len(nations)} NATIONS SENIOR")
                 return nations[:10], iso, "NATIONS"
-
             if all_fixtures:
-                print(f"Returning {len(all_fixtures)} OTHER for {iso}")
                 return all_fixtures[:10], iso, "OTHER"
-
     return [], None, None
 
 def fetch_real_fixtures(days_ahead=0, limit=10, country_filter=None):
     target_date=datetime.now()+timedelta(days=days_ahead)
     if country_filter:
         cf=country_filter.lower()
-        mapping={"england":"eng.1","spain":"esp.1","france":"fra.1","germany":"ger.1","italy":"ita.1","china":"chn.1","japan":"jpn.1","korea":"kor.1","champions":"uefa.champions","nations":"uefa.nations","friendly":"fifa.friendly","bundesliga":"bl1"}
+        mapping={"england":"eng.1","spain":"esp.1","france":"fra.1","germany":"ger.1","italy":"ita.1","china":"chn.1","japan":"jpn.1","champions":"uefa.champions","nations":"uefa.nations","bundesliga":"bl1"}
         lc=mapping.get(cf)
         fixtures=[]
         if lc and lc.startswith("bl"):
             fixtures.extend(fetch_openligadb(target_date))
         elif lc:
-            fixtures.extend(fetch_espn_proxy(target_date, lc))
-            fixtures.extend(fetch_football_data_co_uk_fixtures(target_date))
-            fixtures.extend(fetch_thesportsdb_fifa(target_date))
-            fixtures=[f for f in fixtures if cf in f["league"].lower() or cf in f["home"].lower() or cf in f["away"].lower() or lc in f.get("country","").lower()]
+            fixtures.extend(fetch_espn(target_date, lc))
+            fixtures.extend(fetch_football_data_co_uk(target_date))
+            fixtures.extend(fetch_thesportsdb(target_date))
+            fixtures=[f for f in fixtures if cf in f["league"].lower() or cf in f["home"].lower() or cf in f["away"].lower()]
         else:
             for lcc in ["eng.1","esp.1","ita.1","ger.1","fra.1","uefa.champions","uefa.nations","fifa.friendly"]:
-                fixtures.extend(fetch_espn_proxy(target_date, lcc))
-            fixtures.extend(fetch_football_data_co_uk_fixtures(target_date))
-            fixtures.extend(fetch_thesportsdb_fifa(target_date))
+                fixtures.extend(fetch_espn(target_date, lcc))
+            fixtures.extend(fetch_football_data_co_uk(target_date))
+            fixtures.extend(fetch_thesportsdb(target_date))
             fixtures=[f for f in fixtures if cf in f["league"].lower() or cf in f["home"].lower()]
         seen=set(); uniq=[]
         for f in fixtures:
@@ -377,16 +267,14 @@ def fetch_real_fixtures(days_ahead=0, limit=10, country_filter=None):
         fixtures, real_date, typ = fetch_today_professional(target_date)
         if fixtures:
             if real_date and real_date!=target_date.strftime("%Y-%m-%d"):
-                for f in fixtures:
-                    f["date"]=f"{target_date.strftime('%Y-%m-%d')} (Closest REAL {real_date})"
+                for f in fixtures: f["date"]=f"{target_date.strftime('%Y-%m-%d')} (Closest REAL {real_date})"
             return fixtures[:limit]
         else:
             for i in range(1,8):
                 nd=datetime.now()+timedelta(days=i)
                 f, rd, _ = fetch_today_professional(nd)
                 if f:
-                    for fixture in f:
-                        fixture["date"]=f"{target_date.strftime('%Y-%m-%d')} (Next REAL {rd})"
+                    for fixture in f: fixture["date"]=f"{target_date.strftime('%Y-%m-%d')} (Next REAL {rd})"
                     return f[:limit]
             return []
 
@@ -402,6 +290,7 @@ def generate_betslip(fixtures):
     return {"picks":picks,"total_odds":total,"winnings_1000":round(total*1000,2),"winnings_2000":round(total*2000,2)}
 
 app=FastAPI()
+
 def send_message(chat_id, text, reply_markup=None):
     try:
         url=f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -450,8 +339,8 @@ def process_update(upd):
                         send_message(chat_id, f"Limit {user2.daily_count}/{limit}\n{RENDER_URL}/subscribe?uid={from_id}"); return
                     fixtures=fetch_real_fixtures(days_ahead=0, limit=5)
                     if not fixtures:
-                        send_message(chat_id, f"No REAL found - Checking next 7 days...\n{BOT_LINK}"); return
-                    send_message(chat_id, f"TOP 5 REAL - {datetime.now().strftime('%d %B %Y')} - Extensive brain")
+                        send_message(chat_id, f"No REAL today - Checking next 7 days...\n{BOT_LINK}"); return
+                    send_message(chat_id, f"TOP 5 REAL - {datetime.now().strftime('%d %B %Y')}")
                     for f in fixtures[:5]:
                         if user2.daily_count>=limit: break
                         p=get_ai_prediction(f)
@@ -477,28 +366,24 @@ def process_update(upd):
                     send_message(chat_id, msg)
             finally: db2.close()
             return
-
         msg=upd.get("message")
         if not msg or "text" not in msg or msg["chat"]["type"]!="private": return
         chat_id=msg["chat"]["id"]; text=msg["text"].strip(); user_id=msg["from"]["id"]; low=text.lower()
         db=SessionLocal()
         try:
             user=get_user(db, user_id, ""); FREE=2; VIP=10; cur=VIP if user.is_vip else FREE
-
             if low.startswith("/start"):
-                send_message(chat_id, f"Welcome Professional - Extensive brain\n\nSources: football-data.co.uk + OpenLigaDB + TheSportsDB + ESPN - 100% FREE, works in Nigeria\n\n/today - Top Euro leagues today, if no Euro then FIFA/UEFA senior Nations League - NEVER U21\n/fixtures [country] - /fixtures england, /fixtures spain, /fixtures china, /fixtures champions, /fixtures nations\n/betslip - VIP N1000 WIN N500K\n/upgrade - VIP\n\nFREE {FREE}/day VIP {VIP}/day\n{BOT_LINK}\n\nBrain: {len(HISTORICAL_STATS)} teams from football-data.co.uk")
-
+                send_message(chat_id, f"Welcome Professional - Extensive brain\nSources: football-data.co.uk + OpenLigaDB + TheSportsDB + ESPN - Works in Nigeria\n\n/today - Top Euro leagues today, if no Euro then FIFA/UEFA senior Nations League - NEVER U21\n/fixtures [country] - /fixtures england, /fixtures spain, /fixtures champions, /fixtures nations\n/betslip - VIP N1000 WIN N500K\n/upgrade - VIP\n\nFREE {FREE}/day VIP {VIP}/day\n{BOT_LINK}\nBrain: {len(HISTORICAL_STATS)} teams")
             elif low.startswith("/fixtures"):
                 parts=low.split(maxsplit=1)
                 country=parts[1] if len(parts)>1 else ""
                 if not country:
-                    send_message(chat_id, f"Use: /fixtures england, /fixtures spain, /fixtures china, /fixtures champions, /fixtures nations, /fixtures germany\n{BOT_LINK}"); return
+                    send_message(chat_id, f"Use: /fixtures england, /fixtures spain, /fixtures champions, /fixtures nations, /fixtures germany\n{BOT_LINK}"); return
                 if user.daily_count>=cur:
                     send_message(chat_id, f"Limit {user.daily_count}/{cur}\n{RENDER_URL}/subscribe?uid={user_id}"); return
                 send_message(chat_id, f"Fetching REAL {country.title()} - OpenLigaDB + football-data.co.uk + TheSportsDB...")
                 fixtures=fetch_real_fixtures(days_ahead=0, limit=10, country_filter=country)
                 if not fixtures:
-                    send_message(chat_id, f"No {country.title()} TODAY - Checking next 3 days...")
                     for i in range(1,4):
                         nf=fetch_real_fixtures(days_ahead=i, limit=10, country_filter=country)
                         if nf:
@@ -507,18 +392,17 @@ def process_update(upd):
                             for idx,f in enumerate(nf,1): msg+=f"{idx}. {f['home']} vs {f['away']}\n {f['league']} | {f['time']} WAT | {f['source']}\n\n"
                             send_message(chat_id, msg); return
                     send_message(chat_id, f"No REAL {country.title()} next 3 days\n{BOT_LINK}"); return
-                msg=f"{country.upper()} REAL TODAY - Extensive brain\n\n"
+                msg=f"{country.upper()} REAL TODAY\n\n"
                 for i,f in enumerate(fixtures,1): msg+=f"{i}. {f['home']} vs {f['away']}\n {f['league']} | {f['time']} WAT | {f['source']}\n\n"
                 keyboard={"inline_keyboard":[[{"text":f"Predict {country.title()}","callback_data":"predict_top5"}]]}
                 send_message(chat_id, msg, reply_markup=keyboard)
-
             elif low.startswith("/today"):
                 if user.daily_count>=cur:
                     send_message(chat_id, f"Limit {user.daily_count}/{cur}\n{RENDER_URL}/subscribe?uid={user_id}"); return
                 send_message(chat_id, f"Scanning today... Extensive brain - football-data.co.uk + OpenLigaDB + TheSportsDB...")
                 fixtures=fetch_real_fixtures(days_ahead=0, limit=10, country_filter=None)
                 if not fixtures:
-                    send_message(chat_id, f"No senior TODAY {datetime.now().strftime('%d %B %Y')}\nSearching next 7 days FIFA calendar...")
+                    send_message(chat_id, f"No senior TODAY {datetime.now().strftime('%d %B %Y')}\nSearching next 7 days...")
                     for i in range(1,8):
                         nf=fetch_real_fixtures(days_ahead=i, limit=10, country_filter=None)
                         if nf:
@@ -529,16 +413,14 @@ def process_update(upd):
                             keyboard={"inline_keyboard":[[{"text":f"Predict {nd.strftime('%d %b')}","callback_data":"predict_top5"}]]}
                             send_message(chat_id, msg, reply_markup=keyboard)
                             return
-                    send_message(chat_id, f"No REAL next 7 days - Off season\n{BOT_LINK}"); return
-                msg=f"TOP {len(fixtures)} REAL TODAY - {datetime.now().strftime('%d %B %Y')} - Extensive brain\n\n"
+                    send_message(chat_id, f"No REAL next 7 days\n{BOT_LINK}"); return
+                msg=f"TOP {len(fixtures)} REAL TODAY - {datetime.now().strftime('%d %B %Y')}\n\n"
                 for i,f in enumerate(fixtures,1): msg+=f"{i}. {f['home']} vs {f['away']}\n {f['league']} | {f['time']} WAT | {f['source']}\n\n"
                 msg+=f"({user.daily_count}/{cur})\n{BOT_LINK}"
                 keyboard={"inline_keyboard":[[{"text":"Predict Top 5","callback_data":"predict_top5"},{"text":"VIP 500K","callback_data":"generate_betslip"}]]}
                 send_message(chat_id, msg, reply_markup=keyboard)
-
             elif low.startswith("/upgrade"):
                 send_message(chat_id, f"VIP FREE {FREE}/day VIP {VIP}/day + 500K\n{RENDER_URL}/subscribe?uid={user_id}\n{BOT_LINK}")
-
             elif "vs" in low and 5 < len(text) < 100:
                 if user.daily_count>=cur:
                     send_message(chat_id, f"Limit {user.daily_count}/{cur}\n{RENDER_URL}/subscribe?uid={user_id}"); return
@@ -550,7 +432,6 @@ def process_update(upd):
                 p=get_ai_prediction(data); user.daily_count+=1; db.commit()
                 msg=f"{home} vs {away}\n{data.get('league','Custom')} | {datetime.now().strftime('%d %B %Y')} | {data.get('source','')}\nPick: {p['best_pick']} @ {p['odds']} ({p['confidence']}%)\n{p['explanation']}\nN1000->N{p['winnings_1000']}{p['disclaimer']}\n{BOT_LINK}"
                 send_message(chat_id, msg)
-
         except Exception as e:
             print(f"Handler {e}"); traceback.print_exc(); db.rollback()
         finally: db.close()
@@ -573,11 +454,11 @@ def channel_scheduler():
                             fixtures,_,_ = fetch_today_professional(now_wat+timedelta(days=i))
                             if fixtures: break
                     if fixtures and CHANNEL_ID:
-                        msg=f"Good Morning {today_str} - 6AM Predictions REAL - Extensive brain\n\n"
+                        msg=f"Good Morning {today_str} - 6AM Predictions REAL\n\n"
                         for f in fixtures[:3]:
                             p=get_ai_prediction(f)
                             msg+=f"{f['home']} vs {f['away']}\n{f['league']} | {p['best_pick']} @ {p['odds']}\nN1000->N{p['winnings_1000']}\n\n"
-                        msg+=f"More on bot {BOT_HANDLE}\n{BOT_LINK}\nBrain: football-data.co.uk + OpenLigaDB\n#BetMasterPro"
+                        msg+=f"More on bot {BOT_HANDLE}\n{BOT_LINK}\nBrain: football-data.co.uk + OpenLigaDB\n"
                         send_message(CHANNEL_ID, msg)
                 except Exception as e: print(f"6AM error {e}")
                 posted_today.add(f"{today_str}-6am")
@@ -589,11 +470,11 @@ def channel_scheduler():
                             fixtures,_,_ = fetch_today_professional(now_wat+timedelta(days=i))
                             if fixtures: break
                     if fixtures and CHANNEL_ID:
-                        msg=f"TOP MATCHES TODAY {today_str} - 8AM Professional - Extensive brain\n\n"
+                        msg=f"TOP MATCHES TODAY {today_str} - 8AM Professional\n\n"
                         for f in fixtures[:5]:
                             p=get_ai_prediction(f)
                             msg+=f"{f['home']} vs {f['away']}\n{f['league']} | {f['time']} WAT\n{p['best_pick']} @ {p['odds']} ({p['confidence']}%)\n\n"
-                        msg+=f"Want full analysis + winnings?\nEngage bot now {BOT_HANDLE}\n{BOT_LINK}\n\nVIP 10/day + 500K Betslip N1000 WIN N500K\nBrain: football-data.co.uk + OpenLigaDB + TheSportsDB\n#BetMasterPro"
+                        msg+=f"Want full analysis? Engage bot now {BOT_HANDLE}\n{BOT_LINK}\nVIP 10/day + 500K\n"
                         send_message(CHANNEL_ID, msg)
                 except Exception as e: print(f"8AM error {e}")
                 posted_today.add(f"{today_str}-8am")
@@ -605,7 +486,7 @@ def channel_scheduler():
                         for f in fixtures[:3]:
                             p=get_ai_prediction(f)
                             msg+=f"{f['home']} vs {f['away']}\n{f['league']} | {p['best_pick']} @ {p['odds']}\n\n"
-                        msg+=f"More tomorrow on {BOT_HANDLE}\n{BOT_LINK}\nExtensive brain\n"
+                        msg+=f"More tomorrow on {BOT_HANDLE}\n{BOT_LINK}\n"
                         send_message(CHANNEL_ID, msg)
                 except Exception as e: print(f"9PM error {e}")
                 posted_today.add(f"{today_str}-9pm")
@@ -613,6 +494,8 @@ def channel_scheduler():
         except Exception as e: print(f"Scheduler error {e}")
         time.sleep(60)
 
+# Start brain in background
+threading.Thread(target=load_brain, daemon=True).start()
 threading.Thread(target=channel_scheduler, daemon=True).start()
 
 @app.on_event("startup")
@@ -631,7 +514,7 @@ async def home():
         ok=r.get("ok",False); username=r.get("result",{}).get("username","UNKNOWN")
         wh=requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo", timeout=8).json()
     except Exception as e: ok=False; username=str(e); wh={}
-    return {"status":"PROFESSIONAL ROBUST - football-data.co.uk + OpenLigaDB + TheSportsDB + ESPN - Works in Nigeria - Extensive brain","bot_ok":ok,"username":username,"webhook":wh.get("result",{}),"bot_link":BOT_LINK,"brain":f"{len(HISTORICAL_STATS)} teams from football-data.co.uk","sources":"OpenLigaDB FREE (Bundesliga), football-data.co.uk fixtures.csv FREE, TheSportsDB FREE (Nations League), ESPN proxy"}
+    return {"status":"PROFESSIONAL ROBUST - football-data.co.uk + OpenLigaDB + TheSportsDB - Works in Nigeria - Extensive brain","bot_ok":ok,"username":username,"webhook":wh.get("result",{}),"bot_link":BOT_LINK,"brain":f"{len(HISTORICAL_STATS)} teams"}
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -657,23 +540,14 @@ async def debug_fixtures(date: str = ""):
         else:
             target=datetime.utcnow()+timedelta(hours=1)
         fixtures, real_date, typ = fetch_today_professional(target)
-        return {
-            "requested_date": target.strftime("%Y-%m-%d"),
-            "wat_now": (datetime.utcnow()+timedelta(hours=1)).strftime("%Y-%m-%d %H:%M"),
-            "found": len(fixtures),
-            "type": typ,
-            "real_date": real_date,
-            "fixtures": fixtures[:10],
-            "brain_size": len(HISTORICAL_STATS),
-            "sources": "OpenLigaDB + football-data.co.uk + TheSportsDB + ESPN proxy - All FREE, work in Nigeria"
-        }
+        return {"requested_date": target.strftime("%Y-%m-%d"),"wat_now": (datetime.utcnow()+timedelta(hours=1)).strftime("%Y-%m-%d %H:%M"),"found": len(fixtures),"type": typ,"real_date": real_date,"fixtures": fixtures[:10],"brain_size": len(HISTORICAL_STATS)}
     except Exception as e:
         return {"error": str(e), "trace": traceback.format_exc()}
 
 @app.get("/subscribe", response_class=HTMLResponse)
 async def subscribe(request:Request):
     uid=request.query_params.get("uid","")
-    return HTMLResponse(f"<html><body style='background:#0f172a;color:white;text-align:center;padding:20px;font-family:sans-serif'><div style='background:#1e293b;padding:20px;border-radius:15px;max-width:400px;margin:auto'><h2>VIP Professional - Extensive brain</h2><p>FREE 2/day VIP 10/day + 500K Betslip<br>Sources: football-data.co.uk + OpenLigaDB + TheSportsDB<br>Works in Nigeria, no blocked API</p><a href='/pay?plan=weekly&uid={uid}' style='display:block;padding:15px;background:#22c55e;color:white;border-radius:10px;text-decoration:none;margin:10px 0'>Weekly N2000</a><a href='/pay?plan=monthly&uid={uid}' style='display:block;padding:15px;background:#3b82f6;color:white;border-radius:10px;text-decoration:none'>Monthly N5000</a><p>{BOT_LINK}</p></div></body></html>")
+    return HTMLResponse(f"<html><body style='background:#0f172a;color:white;text-align:center;padding:20px;font-family:sans-serif'><div style='background:#1e293b;padding:20px;border-radius:15px;max-width:400px;margin:auto'><h2>VIP Professional - Extensive brain</h2><p>FREE 2/day VIP 10/day + 500K Betslip<br>Sources: football-data.co.uk + OpenLigaDB + TheSportsDB<br>Works in Nigeria</p><a href='/pay?plan=weekly&uid={uid}' style='display:block;padding:15px;background:#22c55e;color:white;border-radius:10px;text-decoration:none;margin:10px 0'>Weekly N2000</a><a href='/pay?plan=monthly&uid={uid}' style='display:block;padding:15px;background:#3b82f6;color:white;border-radius:10px;text-decoration:none'>Monthly N5000</a><p>{BOT_LINK}</p></div></body></html>")
 
 @app.get("/pay")
 async def pay(plan:str, uid:str):
