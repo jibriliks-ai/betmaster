@@ -15,9 +15,8 @@ FOOTBALL_DATA_KEY = os.getenv("FOOTBALL_DATA_KEY","")
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL") or "https://betmaster-p09f.onrender.com"
 BOT_LINK = "https://t.me/Betmasterpro_bot"
 BOT_HANDLE = "@Betmasterpro_bot"
-CHANNEL_LINK = "https://t.me/+IFK0qoDI2B5lYWI0"
 
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Text
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./betmaster.db")
@@ -34,7 +33,6 @@ class User(Base):
     last_reset = Column(String, default=str(date.today()))
     is_vip = Column(Boolean, default=False)
     vip_expiry = Column(String, default="")
-    favorite_league = Column(String, default="Premier League")
 Base.metadata.create_all(bind=engine)
 
 def get_user(db, user_id, username=""):
@@ -65,12 +63,12 @@ def get_ai_prediction(data, is_betslip=False):
     seed=int(hashlib.md5(f"{home}{away}{data.get('date','')}".encode()).hexdigest()[:8],16)
     random.seed(seed)
     if is_betslip:
-        picks=[{"pick":f"{home} Win","odds":round(random.uniform(2.3,3.6),2),"conf":72,"reason":"High odds 500K combo"}]
+        picks=[{"pick":f"{home} Win","odds":round(random.uniform(2.3,3.6),2),"conf":72,"reason":"High odds for 500K combo - Senior"}]
     else:
         if "nations league" in data.get("league","").lower() or "friendly" in data.get("league","").lower():
-            picks=[{"pick":f"{home} Win or Draw (1X)","odds":data.get("odds_1x",1.40),"conf":82,"reason":f"Senior national team: {home} unbeaten 5 senior home games Nations League"}]
+            picks=[{"pick":f"{home} Win or Draw (1X)","odds":data.get("odds_1x",1.40),"conf":82,"reason":f"Senior national: {home} unbeaten 5 senior home Nations League"}]
         else:
-            picks=[{"pick":"Over 1.5 Goals","odds":data.get("odds_over15",1.32),"conf":86,"reason":f"{home} scored 9/10 senior league games, European top league banker"}]
+            picks=[{"pick":"Over 1.5 Goals","odds":data.get("odds_over15",1.32),"conf":86,"reason":f"Top European league: {home} scored 9/10 senior games banker"}]
     best=random.choice(picks)
     return {"best_pick":best["pick"],"odds":float(best["odds"]),"confidence":best["conf"],"explanation":best["reason"],"verdict":f"PLAY {best['pick']} @ {best['odds']}","winnings_1000":calc(best["odds"],1000),"winnings_2000":calc(best["odds"],2000),"disclaimer":"\n\n18+ Bet responsibly."}
 
@@ -83,14 +81,15 @@ def fetch_football_data(date_obj):
     try:
         url=f"https://api.football-data.org/v4/matches?dateFrom={iso}&dateTo={iso}"
         r=requests.get(url, headers={"X-Auth-Token":FOOTBALL_DATA_KEY}, timeout=15)
-        if r.status_code!=200: return []
+        if r.status_code!=200:
+            print(f"FD {iso} status {r.status_code}")
+            return []
         fixtures=[]
         for m in r.json().get("matches",[])[:60]:
-            league_name=m["competition"]["name"]
-            if is_youth(league_name): continue
+            if is_youth(m["competition"]["name"]): continue
             utc=datetime.fromisoformat(m["utcDate"].replace("Z","+00:00"))
             wat=(utc+timedelta(hours=1)).strftime("%H:%M")
-            fixtures.append({"home":m["homeTeam"]["shortName"] or m["homeTeam"]["name"],"away":m["awayTeam"]["shortName"] or m["awayTeam"]["name"],"league":league_name,"time":wat,"date":iso,"country":"EU","source":"Football-Data.org","odds_h":2.2,"odds_d":3.2,"odds_a":2.9,"odds_over15":1.32,"odds_over25":1.9,"odds_btts":1.75,"odds_1x":1.35})
+            fixtures.append({"home":m["homeTeam"]["shortName"] or m["homeTeam"]["name"],"away":m["awayTeam"]["shortName"] or m["awayTeam"]["name"],"league":m["competition"]["name"],"time":wat,"date":iso,"country":"EU","source":"Football-Data.org","odds_h":2.2,"odds_d":3.2,"odds_a":2.9,"odds_over15":1.32,"odds_over25":1.9,"odds_btts":1.75,"odds_1x":1.35})
         CACHE={"date":iso,"fixtures":fixtures,"time":datetime.now()}
         print(f"FD EU {len(fixtures)} for {iso}")
         return fixtures
@@ -104,8 +103,11 @@ def fetch_espn(date_obj, league_code):
     try:
         url=f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_code}/scoreboard?dates={yyyymmdd}"
         r=requests.get(url, headers=HEADERS, timeout=12)
+        print(f"ESPN FETCH {league_code} {yyyymmdd} status={r.status_code}")
         if r.status_code!=200: return []
-        for ev in r.json().get("events",[])[:20]:
+        events=r.json().get("events",[])
+        print(f"ESPN {league_code} {yyyymmdd} events={len(events)}")
+        for ev in events[:20]:
             try:
                 comp=ev["competitions"][0]
                 comps=comp["competitors"]
@@ -118,95 +120,77 @@ def fetch_espn(date_obj, league_code):
                 wat=(dt+timedelta(hours=1)).strftime("%H:%M")
                 fixtures.append({"home":home,"away":away,"league":league,"time":wat,"date":iso,"country":league_code,"source":f"ESPN {league_code}","odds_h":2.3,"odds_d":3.2,"odds_a":2.8,"odds_over15":1.32,"odds_over25":1.9,"odds_btts":1.78,"odds_1x":1.35})
             except: continue
-    except: pass
+    except Exception as e:
+        print(f"ESPN {league_code} exception {e}")
     return fixtures
 
 def fetch_today_professional_logic(date_obj):
     """
-    PROFESSIONAL LOGIC FOR /today:
-    1. First check top European leagues: eng.1, esp.1, fra.1, ger.1, ita.1, uefa.champions
-    2. If European leagues have matches today -> Return European leagues (users want EPL, La Liga etc)
-    3. If NO European leagues today -> Scrape FIFA/UEFA senior national teams: uefa.nations, fifa.friendly
-    4. NEVER U21
+    PROFESSIONAL /today:
+    - WAT timezone fix: Checks WAT today + tomorrow + UTC today
+    - If Top European leagues exist (EPL, La Liga, Ligue1, Bundesliga, Serie A, UCL) -> Show European
+    - If NO European today -> Show FIFA/UEFA senior national (Nations League, Friendlies)
+    - NEVER U21
     """
-    iso=date_obj.strftime("%Y-%m-%d")
-    print(f"=== PROFESSIONAL /today logic for {iso} ===")
+    wat_now = datetime.utcnow() + timedelta(hours=1)
+    dates_to_check = [wat_now, wat_now + timedelta(days=1), datetime.utcnow()]
+    print(f"=== /today WAT {wat_now.strftime('%Y-%m-%d %H:%M')} checking {len(dates_to_check)} dates ===")
 
-    # STEP 1: Check top European leagues first
-    european_leagues=["eng.1","esp.1","fra.1","ger.1","ita.1","uefa.champions"]
-    european_fixtures=[]
-    european_fixtures.extend(fetch_football_data(date_obj))
-    for lc in european_leagues:
-        european_fixtures.extend(fetch_espn(date_obj, lc))
+    all_euro=[]
+    all_nations=[]
 
-    # Deduplicate and remove youth
-    merged={}
-    for f in european_fixtures:
-        key=f"{f['home']}-{f['away']}"
-        if key not in merged: merged[key]=f
-    european_fixtures=list(merged.values())
-    european_fixtures=[f for f in european_fixtures if not is_youth(f["league"])]
-
-    # Filter only top European leagues (not Nations League, not friendlies)
-    top_euro_only=[f for f in european_fixtures if any(x in f["league"].lower() for x in ["premier league","la liga","ligue 1","bundesliga","serie a","champions league","premier","laliga"])]
-
-    if top_euro_only:
-        print(f"STEP 1: Found {len(top_euro_only)} TOP EUROPEAN leagues today - Using European for /today")
-        # Sort by league importance
-        def euro_sort(f):
-            l=f["league"].lower()
-            if "premier league" in l: return 0
-            if "la liga" in l: return 1
-            if "serie a" in l: return 2
-            if "bundesliga" in l: return 3
-            if "ligue 1" in l: return 4
-            if "champions league" in l: return 5
-            return 6
-        top_euro_only.sort(key=euro_sort)
-        return top_euro_only[:10]
-
-    print(f"STEP 1: No top European leagues today {iso} - STEP 2: Checking FIFA/UEFA senior national")
-
-    # STEP 2: No European leagues -> FIFA/UEFA senior national teams
-    fifa_fixtures=[]
-    for lc in ["uefa.nations","fifa.friendly"]:
-        fifa_fixtures.extend(fetch_espn(date_obj, lc))
-
-    # Also check TheSportsDB for FIFA calendar
-    try:
-        url=f"https://www.thesportsdb.com/api/v1/json/3/eventsday.php?d={iso}&s=Soccer"
-        r=requests.get(url, headers=HEADERS, timeout=10)
-        for ev in r.json().get("events",[])[:20]:
-            try:
+    for target_date in dates_to_check:
+        iso=target_date.strftime("%Y-%m-%d")
+        for lc in ["eng.1","esp.1","fra.1","ger.1","ita.1","uefa.champions"]:
+            all_euro.extend(fetch_espn(target_date, lc))
+        all_euro.extend(fetch_football_data(target_date))
+        for lc in ["uefa.nations","fifa.friendly"]:
+            all_nations.extend(fetch_espn(target_date, lc))
+        # Backup TheSportsDB for FIFA calendar
+        try:
+            url=f"https://www.thesportsdb.com/api/v1/json/3/eventsday.php?d={iso}&s=Soccer"
+            r=requests.get(url, headers=HEADERS, timeout=10).json()
+            for ev in r.get("events",[])[:30]:
                 league=ev["strLeague"]
                 if is_youth(league): continue
-                if "nations league" in league.lower() or "international friendly" in league.lower() or "friendly" in league.lower():
-                    fifa_fixtures.append({"home":ev["strHomeTeam"],"away":ev["strAwayTeam"],"league":ev["strLeague"],"time":ev["strTime"][:5] if ev.get("strTime") else "19:45","date":iso,"country":"FIFA","source":"TheSportsDB FIFA","odds_h":2.2,"odds_d":3.2,"odds_a":2.9,"odds_over15":1.32,"odds_over25":1.9,"odds_btts":1.75,"odds_1x":1.35})
-            except: continue
-    except: pass
+                if "nations league" in league.lower() or "international friendly" in league.lower():
+                    all_nations.append({"home":ev["strHomeTeam"],"away":ev["strAwayTeam"],"league":ev["strLeague"],"time":ev["strTime"][:5] if ev.get("strTime") else "19:45","date":wat_now.strftime("%Y-%m-%d"),"country":"FIFA","source":"TheSportsDB","odds_h":2.2,"odds_d":3.2,"odds_a":2.9,"odds_over15":1.32,"odds_over25":1.9,"odds_btts":1.75,"odds_1x":1.35})
+        except: pass
 
-    merged={}
-    for f in fifa_fixtures:
-        key=f"{f['home']}-{f['away']}"
-        if key not in merged: merged[key]=f
-    fifa_fixtures=list(merged.values())
-    fifa_fixtures=[f for f in fifa_fixtures if not is_youth(f["league"])]
+    def dedup(fixtures):
+        merged={}
+        for f in fixtures:
+            key=f"{f['home']}-{f['away']}"
+            if key not in merged: merged[key]=f
+        return [f for f in merged.values() if not is_youth(f["league"])]
 
-    if fifa_fixtures:
-        print(f"STEP 2: Found {len(fifa_fixtures)} FIFA/UEFA senior national today")
-        fifa_fixtures.sort(key=lambda x: 0 if "nations league" in x["league"].lower() else 1)
-        return fifa_fixtures[:10]
+    all_euro=dedup(all_euro)
+    all_nations=dedup(all_nations)
+    print(f"TOTAL Euro {len(all_euro)} | Nations Senior {len(all_nations)}")
+    for f in all_nations[:5]:
+        print(f" NATIONS: {f['home']} vs {f['away']} - {f['league']}")
 
-    print(f"STEP 2: No FIFA/UEFA senior today {iso} either")
+    if all_euro:
+        top_euro=[f for f in all_euro if any(x in f["league"].lower() for x in ["premier league","la liga","ligue 1","bundesliga","serie a","champions league","laliga"])]
+        if top_euro:
+            print(f"/today -> TOP EUROPEAN {len(top_euro)}")
+            return top_euro[:10]
+        if all_euro:
+            return all_euro[:10]
+
+    if all_nations:
+        all_nations.sort(key=lambda x: 0 if "nations league" in x["league"].lower() else 1)
+        print(f"/today -> NO Euro, NATIONS SENIOR {len(all_nations)}")
+        return all_nations[:10]
+
+    print("/today -> NO REAL FOUND")
     return []
 
 def fetch_real_fixtures(days_ahead=0, limit=10, country_filter=None):
     target_date=datetime.now()+timedelta(days=days_ahead)
-
     if country_filter:
-        # /fixtures country - League fixtures of country specified
         cf=country_filter.lower()
-        mapping={"england":"eng.1","spain":"esp.1","france":"fra.1","germany":"ger.1","italy":"ita.1","china":"chn.1","japan":"jpn.1","korea":"kor.1","champions":"uefa.champions","nations":"uefa.nations","asia":"aus.1","friendly":"fifa.friendly"}
+        mapping={"england":"eng.1","spain":"esp.1","france":"fra.1","germany":"ger.1","italy":"ita.1","china":"chn.1","japan":"jpn.1","korea":"kor.1","champions":"uefa.champions","nations":"uefa.nations","asia":"aus.1","friendly":"fifa.friendly","european":"eng.1"}
         lc=mapping.get(cf)
         fixtures=[]
         if lc:
@@ -216,7 +200,7 @@ def fetch_real_fixtures(days_ahead=0, limit=10, country_filter=None):
         else:
             for lcc in ["eng.1","esp.1","ita.1","ger.1","fra.1","chn.1","jpn.1","uefa.champions","uefa.nations","fifa.friendly"]:
                 fixtures.extend(fetch_espn(target_date, lcc))
-            fixtures=[f for f in fixtures if cf in f["league"].lower() or cf in f["home"].lower() or cf in f["away"].lower()]
+            fixtures=[f for f in fixtures if cf in f["league"].lower() or cf in f["home"].lower()]
         seen=set(); uniq=[]
         for f in fixtures:
             k=f"{f['home']}-{f['away']}"
@@ -225,18 +209,7 @@ def fetch_real_fixtures(days_ahead=0, limit=10, country_filter=None):
             if len(uniq)>=limit: break
         return uniq[:limit]
     else:
-        # /today professional logic
-        fixtures=fetch_today_professional_logic(target_date)
-        # If still empty, search next 7 days for REAL (not fake)
-        if not fixtures and days_ahead==0:
-            for i in range(1,8):
-                nd=datetime.now()+timedelta(days=i)
-                nf=fetch_today_professional_logic(nd)
-                if nf:
-                    for f in nf:
-                        f["date"]=f"{target_date.strftime('%Y-%m-%d')} (Next {nd.strftime('%d %b')})"
-                    return nf[:limit]
-        return fixtures[:limit]
+        return fetch_today_professional_logic(target_date)[:limit]
 
 def generate_betslip(fixtures):
     if len(fixtures)<10: return None
@@ -257,13 +230,11 @@ def send_message(chat_id, text, reply_markup=None):
         if len(text)>4000: text=text[:4000]+"..."
         payload={"chat_id":chat_id,"text":text}
         if reply_markup: payload["reply_markup"]=reply_markup
-        r=requests.post(url, json=payload, timeout=15)
-        return r
+        requests.post(url, json=payload, timeout=15)
     except Exception as e:
         print(f"Send error {e}")
 
 def set_bot_menu():
-    # SHORT MENU ONLY - As requested
     commands=[
         {"command":"today","description":"today"},
         {"command":"fixtures","description":"fixtures"},
@@ -342,7 +313,7 @@ def process_update(upd):
             user=get_user(db, user_id, username); FREE=2; VIP=10; cur=VIP if user.is_vip else FREE
 
             if low.startswith("/start"):
-                send_message(chat_id, f"Welcome Professional Bot - REAL ONLY\n\nMenu:\ntoday - Top European leagues today (English, Spanish, French, German etc) - If no Euro leagues, shows FIFA/UEFA senior national\nfixtures [country] - League fixtures of country specified\nExample: /fixtures england - Premier League\n/fixtures spain - La Liga\n/fixtures china - Chinese Super League\n/fixtures champions - Champions League\n/fixtures nations - Nations League\n/betslip - VIP N1000 WIN N500K\n/upgrade - VIP\n\nFREE {FREE}/day VIP {VIP}/day\n{BOT_LINK}")
+                send_message(chat_id, f"Welcome Professional Bot - REAL ONLY\n\n/today - Top European leagues today (English, Spanish, French, German etc) - If no Euro leagues, shows FIFA/UEFA senior national\n/fixtures [country] - League fixtures of country\nExample: /fixtures england, /fixtures spain, /fixtures china, /fixtures champions, /fixtures nations\n/betslip - VIP N1000 WIN N500K\n/upgrade - VIP\n\nFREE {FREE}/day VIP {VIP}/day\n{BOT_LINK}")
 
             elif low.startswith("/fixtures"):
                 parts=low.split(maxsplit=1)
@@ -385,8 +356,8 @@ def process_update(upd):
                             keyboard={"inline_keyboard":[[{"text":f"Predict {nd.strftime('%d %b')}","callback_data":"predict_top5"}]]}
                             send_message(chat_id, msg, reply_markup=keyboard)
                             return
-                    send_message(chat_id, f"No REAL next 7 days - Off season\nTry /fixtures england etc\n{BOT_LINK}"); return
-                msg=f"TOP {len(fixtures)} REAL TODAY - {datetime.now().strftime('%d %B %Y')} - Professional\n\n"
+                    send_message(chat_id, f"No REAL next 7 days\nTry /fixtures england\n{BOT_LINK}"); return
+                msg=f"TOP {len(fixtures)} REAL TODAY - {datetime.now().strftime('%d %B %Y')}\n\n"
                 for i,f in enumerate(fixtures,1): msg+=f"{i}. {f['home']} vs {f['away']}\n {f['league']} | {f['time']} WAT\n\n"
                 msg+=f"({user.daily_count}/{cur})\n{BOT_LINK}"
                 keyboard={"inline_keyboard":[[{"text":"Predict Top 5","callback_data":"predict_top5"},{"text":"VIP 500K","callback_data":"generate_betslip"}]]}
@@ -416,7 +387,7 @@ def process_update(upd):
                     msg+=f"TOTAL {slip['total_odds']}\nN1000->N{slip['winnings_1000']} N2000->N{slip['winnings_2000']}\n{BOT_LINK}"
                     send_message(chat_id, msg)
                 else:
-                    send_message(chat_id, f"Support {SUPPORT_HANDLE}\nBot {BOT_LINK}\nYou {user.daily_count}/{cur}")
+                    send_message(chat_id, f"Support @Jibriliks\nBot {BOT_LINK}\nYou {user.daily_count}/{cur}")
 
             elif "vs" in low and 5 < len(text) < 100:
                 if user.daily_count>=cur:
@@ -436,19 +407,16 @@ def process_update(upd):
     except Exception as outer:
         print(f"Outer {outer}"); traceback.print_exc()
 
-# --- SCHEDULER FOR 6AM, 9PM, 8AM CHANNEL POSTS ---
 def channel_scheduler():
     posted_today=set()
     while True:
         try:
             now_utc=datetime.utcnow()
-            now_wat=now_utc+timedelta(hours=1) # WAT = UTC+1
+            now_wat=now_utc+timedelta(hours=1)
             hm_wat=now_wat.strftime("%H:%M")
             today_str=now_wat.strftime("%Y-%m-%d")
 
-            # 6 AM WAT = 05:00 UTC
             if hm_wat=="06:00" and f"{today_str}-6am" not in posted_today:
-                print(f"SCHEDULER 6AM WAT posting")
                 try:
                     fixtures=fetch_real_fixtures(days_ahead=0, limit=5)
                     if not fixtures:
@@ -456,20 +424,16 @@ def channel_scheduler():
                             fixtures=fetch_real_fixtures(days_ahead=i, limit=5)
                             if fixtures: break
                     if fixtures and CHANNEL_ID:
-                        msg=f"☀️ Good Morning {today_str} - 6AM Predictions - REAL FIXTURES\n\n"
+                        msg=f"Good Morning {today_str} - 6AM Predictions REAL\n\n"
                         for f in fixtures[:3]:
                             p=get_ai_prediction(f)
-                            msg+=f"⚽ {f['home']} vs {f['away']}\n🏆 {f['league']} | {p['best_pick']} @ {p['odds']}\n💰 N1000->N{p['winnings_1000']}\n\n"
-                        msg+=f"👉 Get more predictions on bot {BOT_HANDLE}\n🔗 {BOT_LINK}\n\n#BetMasterPro #Predictions"
+                            msg+=f"{f['home']} vs {f['away']}\n{f['league']} | {p['best_pick']} @ {p['odds']}\nN1000->N{p['winnings_1000']}\n\n"
+                        msg+=f"More predictions on bot {BOT_HANDLE}\n{BOT_LINK}\n#BetMasterPro"
                         send_message(CHANNEL_ID, msg)
-                        print(f"6AM channel posted")
-                except Exception as e:
-                    print(f"6AM scheduler error {e}")
+                except Exception as e: print(f"6AM error {e}")
                 posted_today.add(f"{today_str}-6am")
 
-            # 8 AM WAT = 07:00 UTC - Main channel post every morning
             if hm_wat=="08:00" and f"{today_str}-8am" not in posted_today:
-                print(f"SCHEDULER 8AM WAT channel posting")
                 try:
                     fixtures=fetch_real_fixtures(days_ahead=0, limit=5)
                     if not fixtures:
@@ -477,41 +441,33 @@ def channel_scheduler():
                             fixtures=fetch_real_fixtures(days_ahead=i, limit=5)
                             if fixtures: break
                     if fixtures and CHANNEL_ID:
-                        msg=f"🔥 TOP MATCHES TODAY {today_str} - 8AM - Professional Real Only\n\n"
+                        msg=f"TOP MATCHES TODAY {today_str} - 8AM Professional\n\n"
                         for f in fixtures[:5]:
                             p=get_ai_prediction(f)
-                            msg+=f"⚽ {f['home']} vs {f['away']}\n🏆 {f['league']} | {f['time']} WAT\n🎯 {p['best_pick']} @ {p['odds']} ({p['confidence']}%)\n\n"
-                        msg+=f"👉 Want full analysis + winnings?\n🤖 Engage bot now {BOT_HANDLE}\n🔗 {BOT_LINK}\n\n💎 VIP gets 10/day + 500K Betslip (N1000 WIN N500K)\n📲 Click bot to start - /today\n\n#Football #BettingTips #BetMasterPro"
+                            msg+=f"{f['home']} vs {f['away']}\n{f['league']} | {f['time']} WAT\n{p['best_pick']} @ {p['odds']} ({p['confidence']}%)\n\n"
+                        msg+=f"Want full analysis + winnings?\nEngage bot now {BOT_HANDLE}\n{BOT_LINK}\n\nVIP 10/day + 500K Betslip N1000 WIN N500K\nClick bot /today\n#Football #BetMasterPro"
                         send_message(CHANNEL_ID, msg)
-                        print(f"8AM channel posted with bot link")
-                except Exception as e:
-                    print(f"8AM scheduler error {e}")
+                except Exception as e: print(f"8AM error {e}")
                 posted_today.add(f"{today_str}-8am")
 
-            # 9 PM WAT = 20:00 UTC
             if hm_wat=="21:00" and f"{today_str}-9pm" not in posted_today:
-                print(f"SCHEDULER 9PM WAT posting")
                 try:
                     fixtures=fetch_real_fixtures(days_ahead=1, limit=5)
                     if fixtures and CHANNEL_ID:
-                        msg=f"🌙 Evening 9PM - TOMORROW'S TOP FIXTURES { (datetime.now()+timedelta(days=1)).strftime('%d %B %Y') }\n\n"
+                        msg=f"Evening 9PM - TOMORROW'S TOP { (datetime.now()+timedelta(days=1)).strftime('%d %B %Y') }\n\n"
                         for f in fixtures[:3]:
                             p=get_ai_prediction(f)
-                            msg+=f"⚽ {f['home']} vs {f['away']}\n🏆 {f['league']} | {p['best_pick']} @ {p['odds']}\n\n"
-                        msg+=f"👉 More predictions tomorrow on {BOT_HANDLE}\n🔗 {BOT_LINK}\n\n#EveningTips #BetMasterPro"
+                            msg+=f"{f['home']} vs {f['away']}\n{f['league']} | {p['best_pick']} @ {p['odds']}\n\n"
+                        msg+=f"More tomorrow on {BOT_HANDLE}\n{BOT_LINK}\n#BetMasterPro"
                         send_message(CHANNEL_ID, msg)
-                        print(f"9PM channel posted")
-                except Exception as e:
-                    print(f"9PM scheduler error {e}")
+                except Exception as e: print(f"9PM error {e}")
                 posted_today.add(f"{today_str}-9pm")
 
-            # Reset posted set at midnight WAT
             if hm_wat=="00:05":
                 posted_today.clear()
-                print("Scheduler reset for new day")
 
         except Exception as e:
-            print(f"Scheduler loop error {e}")
+            print(f"Scheduler error {e}")
         time.sleep(60)
 
 threading.Thread(target=channel_scheduler, daemon=True).start()
@@ -523,8 +479,7 @@ async def on_startup():
         url=f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={RENDER_URL}/webhook&drop_pending_updates=true"
         r=requests.get(url, timeout=10).json()
         print(f"WEBHOOK SET {r}")
-    except Exception as e:
-        print(f"Webhook error {e}")
+    except Exception as e: print(f"Webhook error {e}")
 
 @app.get("/")
 async def home():
@@ -533,7 +488,7 @@ async def home():
         ok=r.get("ok",False); username=r.get("result",{}).get("username","UNKNOWN")
         wh=requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo", timeout=8).json()
     except Exception as e: ok=False; username=str(e); wh={}
-    return {"status":"PROFESSIONAL FINAL - TODAY = EU first then FIFA senior - NO U21 - 6AM/8AM/9PM posts with bot link","bot_ok":ok,"username":username,"webhook":wh.get("result",{}),"bot_link":BOT_LINK,"bot_handle":BOT_HANDLE,"menu":"today, fixtures, betslip, upgrade, help, start - SHORT","today_logic":"If European leagues (EPL, La Liga, Ligue1, Bundesliga, Serie A, UCL) have matches today -> show European. If NO European today -> show FIFA/UEFA senior national (Nations League, Friendlies)","posts":"6AM WAT, 8AM WAT channel with link @Betmasterpro_bot, 9PM WAT"}
+    return {"status":"PROFESSIONAL - TODAY Euro first then FIFA senior NO U21 - Posts 6AM 8AM 9PM with bot link","bot_ok":ok,"username":username,"webhook":wh.get("result",{}),"bot_link":BOT_LINK,"bot_handle":BOT_HANDLE}
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -554,7 +509,7 @@ async def set_webhook():
 @app.get("/subscribe", response_class=HTMLResponse)
 async def subscribe(request:Request):
     uid=request.query_params.get("uid","")
-    return HTMLResponse(f"<html><body style='background:#0f172a;color:white;text-align:center;padding:20px;font-family:sans-serif'><div style='background:#1e293b;padding:20px;border-radius:15px;max-width:400px;margin:auto'><h2>VIP Professional</h2><p>FREE 2/day VIP 10/day + 500K Betslip<br>EU first, then FIFA senior, NO U21<br>6AM/8AM/9PM posts</p><a href='/pay?plan=weekly&uid={uid}' style='display:block;padding:15px;background:#22c55e;color:white;border-radius:10px;text-decoration:none;margin:10px 0'>Weekly N2000</a><a href='/pay?plan=monthly&uid={uid}' style='display:block;padding:15px;background:#3b82f6;color:white;border-radius:10px;text-decoration:none'>Monthly N5000</a><p>{BOT_LINK}</p></div></body></html>")
+    return HTMLResponse(f"<html><body style='background:#0f172a;color:white;text-align:center;padding:20px;font-family:sans-serif'><div style='background:#1e293b;padding:20px;border-radius:15px;max-width:400px;margin:auto'><h2>VIP Professional</h2><p>FREE 2/day VIP 10/day + 500K Betslip<br>EU first then FIFA senior NO U21</p><a href='/pay?plan=weekly&uid={uid}' style='display:block;padding:15px;background:#22c55e;color:white;border-radius:10px;text-decoration:none;margin:10px 0'>Weekly N2000</a><a href='/pay?plan=monthly&uid={uid}' style='display:block;padding:15px;background:#3b82f6;color:white;border-radius:10px;text-decoration:none'>Monthly N5000</a><p>{BOT_LINK}</p></div></body></html>")
 
 @app.get("/pay")
 async def pay(plan:str, uid:str):
