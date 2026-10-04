@@ -1,21 +1,23 @@
-services:
-  - type: web
-    name: betmaster-bot
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
-    envVars:
-      - key: BOT_TOKEN
-        sync: false
-      - key: ADMIN_ID
-        sync: false
-      - key: OPENROUTER_KEY
-        sync: false
-      - key: API_FOOTBALL_KEY
-        sync: false
-      - key: GROUP_USERNAME
-        value: "@betmasterpro"
-      - key: PAYSTACK_PUBLIC_KEY
-        sync: false
-      - key: PAYSTACK_SECRET
-        sync: false
+envVars:
+  - key: BOT_TOKEN
+    sync: false
+  - key: ADMIN_ID
+    sync: false
+  - key: OPENROUTER_KEY
+    sync: false
+  - key: API_FOOTBALL_KEY
+    sync: false
+  - key: GROUP_USERNAME
+    value: "@betmasterpro"
+  - key: PAYSTACK_PUBLIC_KEY
+    sync: false
+  - key: PAYSTACK_SECRET
+    sync: false
+  - key: THE_ODDS_API_KEY
+    sync: false
+  - key: FLUTTERWAVE_SECRET_KEY
+    sync: false
+  - key: RENDER_EXTERNAL_URL
+    sync: false
+  - key: NIGERIA_PROXY_URL
+    sync: false   # for Bet9ja/BetKing scraping
