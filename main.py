@@ -1,10 +1,9 @@
 """
 main.py — BetMaster Pro
 Global soccer prediction bot with Dixon-Coles modeling, value-bet detection,
-and multi-region coverage (Europe / Asia / Americas / National teams).
+multi-region coverage, and a professional payment flow.
 
-Data sources: ESPN hidden API, TheSportsDB, OpenFootball JSON, The Odds API.
-No API-Football dependency.
+Data sources: ESPN, TheSportsDB, OpenFootball, The Odds API.
 """
 
 import os
@@ -20,7 +19,6 @@ import io
 import re
 import math
 from datetime import datetime, timedelta, date
-from collections import defaultdict
 
 import numpy as np
 from scipy.stats import poisson
@@ -118,7 +116,7 @@ def get_user(db, user_id, username=""):
 
 
 # ──────────────────────────────────────────────
-# BRAIN: historical stats from football-data.co.uk
+# BRAIN
 # ──────────────────────────────────────────────
 HISTORICAL_STATS = {}
 H2H_CACHE = {}
@@ -141,7 +139,6 @@ def calc(o, s):
 
 
 def load_brain():
-    """Load historical stats from football-data.co.uk CSVs (Europe only)."""
     global HISTORICAL_STATS, LEAGUE_AVG_GOALS
     codes = ["E0", "SP1", "D1", "I1", "F1", "E1", "E2", "E3",
              "SP2", "D2", "I2", "F2", "N1", "B1", "P1", "T1", "G1", "SC0"]
@@ -238,7 +235,6 @@ def load_brain():
             if league_goals:
                 LEAGUE_AVG_GOALS[code] = sum(league_goals) / len(league_goals)
 
-            # Trim form to last 5
             for k in HISTORICAL_STATS:
                 if len(HISTORICAL_STATS[k]["form"]) > 5:
                     HISTORICAL_STATS[k]["form"] = HISTORICAL_STATS[k]["form"][-5:]
@@ -246,7 +242,6 @@ def load_brain():
         except Exception as e:
             print(f"Brain load error {code}: {e}")
 
-    # Fallback league averages if missing
     for code in codes:
         if code not in LEAGUE_AVG_GOALS:
             LEAGUE_AVG_GOALS[code] = 2.65
@@ -256,26 +251,22 @@ def load_brain():
 
 
 # ──────────────────────────────────────────────
-# DIXON-COLES POISSON MODEL
+# DIXON-COLES MODEL
 # ──────────────────────────────────────────────
 def estimate_team_strengths(team_name, league_code="E0"):
-    """Estimate attack/defense strengths from historical stats."""
     stats = HISTORICAL_STATS.get(team_name)
-    league_avg = LEAGUE_AVG_GOALS.get(league_code, 2.65) / 2.0  # per-team avg
+    league_avg = LEAGUE_AVG_GOALS.get(league_code, 2.65) / 2.0
 
     if not stats or stats["games"] < 3:
-        # Neutral fallback
         return {"attack": 1.0, "defense": 1.0, "games": 0, "source": "neutral"}
 
     games = stats["games"]
     avg_scored = stats["scored"] / games
     avg_conceded = stats["conceded"] / games
 
-    # Strength = team_avg / league_avg
     attack = avg_scored / league_avg if league_avg > 0 else 1.0
     defense = avg_conceded / league_avg if league_avg > 0 else 1.0
 
-    # Clamp to reasonable range
     attack = max(0.4, min(2.5, attack))
     defense = max(0.4, min(2.5, defense))
 
@@ -291,29 +282,21 @@ def estimate_team_strengths(team_name, league_code="E0"):
 
 def dixon_coles_predict(home_team, away_team, league_code="E0",
                         home_advantage=0.20, rho=-0.05, max_goals=6):
-    """
-    Dixon-Coles Poisson prediction.
-    Returns win/draw/loss probabilities, expected goals, top scorelines.
-    """
     h = estimate_team_strengths(home_team, league_code)
     a = estimate_team_strengths(away_team, league_code)
 
     league_avg_per_team = LEAGUE_AVG_GOALS.get(league_code, 2.65) / 2.0
 
-    # Expected goals
     home_xg = h["attack"] * a["defense"] * league_avg_per_team * math.exp(home_advantage)
     away_xg = a["attack"] * h["defense"] * league_avg_per_team
 
-    # Clamp xG
     home_xg = max(0.3, min(4.5, home_xg))
     away_xg = max(0.3, min(4.5, away_xg))
 
-    # Build scoreline probability matrix
     probs = np.zeros((max_goals, max_goals))
     for i in range(max_goals):
         for j in range(max_goals):
             p = poisson.pmf(i, home_xg) * poisson.pmf(j, away_xg)
-            # Dixon-Coles low-score correction
             if i <= 1 and j <= 1:
                 if i == 0 and j == 0:
                     p *= (1 - home_xg * away_xg * rho)
@@ -330,7 +313,8 @@ def dixon_coles_predict(home_team, away_team, league_code="E0",
         return {
             "home_win": 33.3, "draw": 33.3, "away_win": 33.3,
             "home_xg": round(home_xg, 2), "away_xg": round(away_xg, 2),
-            "top_scorelines": [], "btts": 50.0, "over25": 50.0,
+            "top_scorelines": [], "btts": 50.0, "over15": 50.0,
+            "over25": 50.0, "over35": 50.0, "top_cs": "1-0",
             "home_strength": h, "away_strength": a,
         }
     probs /= total
@@ -339,40 +323,29 @@ def dixon_coles_predict(home_team, away_team, league_code="E0",
     draw = float(np.trace(probs)) * 100
     away_win = float(np.triu(probs, 1).sum()) * 100
 
-    # BTTS = P(home >= 1 AND away >= 1)
     btts = float(probs[1:, 1:].sum()) * 100
 
-    # Over 2.5 = P(total >= 3)
     over25 = 0.0
+    over15 = 0.0
+    over35 = 0.0
     for i in range(max_goals):
         for j in range(max_goals):
             if i + j >= 3:
                 over25 += probs[i][j]
-    over25 *= 100
-
-    over15 = 0.0
-    for i in range(max_goals):
-        for j in range(max_goals):
             if i + j >= 2:
                 over15 += probs[i][j]
-    over15 *= 100
-
-    over35 = 0.0
-    for i in range(max_goals):
-        for j in range(max_goals):
             if i + j >= 4:
                 over35 += probs[i][j]
+    over25 *= 100
+    over15 *= 100
     over35 *= 100
 
-    # Top 5 scorelines
     scores = []
     for i in range(max_goals):
         for j in range(max_goals):
             scores.append((f"{i}-{j}", round(float(probs[i][j]) * 100, 2)))
     scores.sort(key=lambda x: x[1], reverse=True)
     top_scorelines = scores[:5]
-
-    # Most likely correct score
     top_cs = top_scorelines[0][0] if top_scorelines else "1-0"
 
     return {
@@ -393,7 +366,6 @@ def dixon_coles_predict(home_team, away_team, league_code="E0",
 
 
 def find_value_bets(model_probs, odds):
-    """Compare model probabilities against bookmaker implied probabilities."""
     value_bets = []
     markets = {
         "Home Win": (model_probs.get("home_win", 0), odds.get("home")),
@@ -410,9 +382,7 @@ def find_value_bets(model_probs, odds):
             kelly = max(0.0, (edge / 100.0 * odd - 1) / (odd - 1)) * 100
             value_bets.append({
                 "market": market,
-                "model_prob": round(model_probs.get("home_win" if "Home" in market else
-                                                     "draw" if market == "Draw" else
-                                                     "away_win", 0), 1),
+                "model_prob": round(model_prob, 1),
                 "implied": round(implied, 1),
                 "edge": round(edge, 1),
                 "odds": odd,
@@ -423,14 +393,7 @@ def find_value_bets(model_probs, odds):
     return value_bets
 
 
-# ──────────────────────────────────────────────
-# MASTER PREDICTION ENGINE
-# ──────────────────────────────────────────────
 def predict_match(data):
-    """
-    Master prediction engine.
-    Uses Dixon-Coles + historical form + H2H + value bets.
-    """
     home = data.get("home", "Home")
     away = data.get("away", "Away")
     league = data.get("league", "")
@@ -438,10 +401,8 @@ def predict_match(data):
     if league_code not in LEAGUE_AVG_GOALS:
         league_code = "E0"
 
-    # Dixon-Coles
     dc = dixon_coles_predict(home, away, league_code=league_code)
 
-    # H2H
     h2h_key = f"{home}_vs_{away}"
     h2h_rev = f"{away}_vs_{home}"
     h2h_games = H2H_CACHE.get(h2h_key, []) + H2H_CACHE.get(h2h_rev, [])
@@ -455,7 +416,6 @@ def predict_match(data):
     h2h_btts = len([g for g in h2h_games if g["btts"] == 1])
     h2h_avg_goals = (sum(g["total"] for g in h2h_games) / len(h2h_games)) if h2h_games else 0
 
-    # Blend DC probabilities with H2H evidence (small weight)
     dc_h, dc_d, dc_a = dc["home_win"], dc["draw"], dc["away_win"]
     if h2h_games and len(h2h_games) >= 3:
         h2h_total = len(h2h_games)
@@ -467,7 +427,6 @@ def predict_match(data):
         dc_d = dc_d * (1 - w) + h2h_d_pct * w
         dc_a = dc_a * (1 - w) + h2h_a_pct * w
 
-    # Normalize
     tot = dc_h + dc_d + dc_a
     if tot > 0:
         dc_h, dc_d, dc_a = dc_h / tot * 100, dc_d / tot * 100, dc_a / tot * 100
@@ -478,13 +437,11 @@ def predict_match(data):
         "away_win": round(dc_a, 1),
     }
 
-    # Odds
     odds = {
         "home": float(data.get("odds_h", 0) or 0),
         "draw": float(data.get("odds_d", 0) or 0),
         "away": float(data.get("odds_a", 0) or 0),
     }
-    # Fallback odds if missing
     if odds["home"] <= 1.01:
         odds["home"] = round(100 / max(model_probs["home_win"], 5), 2)
     if odds["draw"] <= 1.01:
@@ -492,10 +449,8 @@ def predict_match(data):
     if odds["away"] <= 1.01:
         odds["away"] = round(100 / max(model_probs["away_win"], 5), 2)
 
-    # Build markets
     markets = []
 
-    # 1X2 markets
     best_1x2 = max(
         [("Home Win", model_probs["home_win"], odds["home"]),
          ("Draw", model_probs["draw"], odds["draw"]),
@@ -512,10 +467,8 @@ def predict_match(data):
                       f"xG: {home} {dc['home_xg']} vs {away} {dc['away_xg']}.",
         })
 
-    # Double Chance
     dc_1x = model_probs["home_win"] + model_probs["draw"]
     dc_x2 = model_probs["draw"] + model_probs["away_win"]
-    dc_12 = model_probs["home_win"] + model_probs["away_win"]
 
     if dc_1x >= 70:
         markets.append({
@@ -534,7 +487,6 @@ def predict_match(data):
             "reason": f"Model: {dc_x2:.1f}% chance {away} does not lose.",
         })
 
-    # BTTS
     if dc["btts"] >= 60:
         markets.append({
             "market": "BTTS",
@@ -553,7 +505,6 @@ def predict_match(data):
             "reason": f"Model: BTTS probability only {dc['btts']}%.",
         })
 
-    # Over/Under
     if dc["over25"] >= 60:
         markets.append({
             "market": "O/U",
@@ -581,7 +532,6 @@ def predict_match(data):
             "reason": f"Model: Over 1.5 probability {dc['over15']}% — banker.",
         })
 
-    # If still nothing (rare), force a pick
     if not markets:
         top = max(
             [("Home Win", model_probs["home_win"], odds["home"]),
@@ -600,10 +550,8 @@ def predict_match(data):
     markets.sort(key=lambda x: x["conf"], reverse=True)
     best = markets[0]
 
-    # Value bets
     vb = find_value_bets(model_probs, odds)
 
-    # Form strings
     h_stats = HISTORICAL_STATS.get(home, {})
     a_stats = HISTORICAL_STATS.get(away, {})
     h_form = "".join(h_stats.get("form", [])[:5]) or "N/A"
@@ -615,7 +563,7 @@ def predict_match(data):
                    f"{h2h_draws}D {h2h_away_wins}W, BTTS {h2h_btts}/{len(h2h_games)}, "
                    f"Avg {h2h_avg_goals:.1f} goals")
 
-    form_str = (f"Form: {home} [{h_form}] | {away} [{a_form}]")
+    form_str = f"Form: {home} [{h_form}] | {away} [{a_form}]"
 
     standings_str = (
         f"Dixon-Coles xG: {home} {dc['home_xg']} — {away} {dc['away_xg']} | "
@@ -623,7 +571,6 @@ def predict_match(data):
         f"{model_probs['away_win']}%"
     )
 
-    # Verdict
     verdict = f"AI RECOMMENDS: {best['market']} — {best['pick']} @ {best['odds']}"
 
     explanation = best["reason"]
@@ -656,12 +603,11 @@ def predict_match(data):
     }
 
 
-# Backwards-compatible alias
 get_dynamic_ai_prediction = predict_match
 
 
 # ──────────────────────────────────────────────
-# ODDS FETCHER — The Odds API
+# ODDS — The Odds API
 # ──────────────────────────────────────────────
 def fetch_the_odds_api(date_obj):
     global ODDS_CACHE
@@ -748,7 +694,6 @@ def fetch_the_odds_api(date_obj):
 
 
 def enrich_with_odds(fixtures, date_obj):
-    """Attach live odds to fixtures when available."""
     odds_map = fetch_the_odds_api(date_obj)
     for f in fixtures:
         key = f"{f['home']}_vs_{f['away']}"
@@ -787,7 +732,6 @@ from fetcher import (
 
 
 def fetch_real_fixtures(days_ahead=0, limit=10, region=None):
-    """Master fixture fetcher for main.py handlers."""
     target = (datetime.utcnow() + timedelta(hours=1) + timedelta(days=days_ahead)).date()
 
     if region:
@@ -796,7 +740,6 @@ def fetch_real_fixtures(days_ahead=0, limit=10, region=None):
         fixtures = fetch_today_fixtures(target, limit=limit)
 
     if not fixtures and days_ahead == 0:
-        # Try tomorrow
         for i in range(1, 8):
             target2 = (datetime.utcnow() + timedelta(hours=1) + timedelta(days=i)).date()
             if region:
@@ -810,7 +753,7 @@ def fetch_real_fixtures(days_ahead=0, limit=10, region=None):
 
 
 # ──────────────────────────────────────────────
-# BETSLIP GENERATOR
+# BETSLIP
 # ──────────────────────────────────────────────
 def generate_betslip(fixtures):
     if len(fixtures) < 5:
@@ -839,7 +782,504 @@ def generate_betslip(fixtures):
 
 
 # ──────────────────────────────────────────────
-# TELEGRAM
+# PAYMENT PAGE TEMPLATES
+# ──────────────────────────────────────────────
+PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="theme-color" content="#0a0e1a">
+<title>BetMaster Pro — VIP Subscription</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0a0e1a; --bg-2: #0f1526;
+    --card: rgba(255,255,255,0.03); --card-hover: rgba(255,255,255,0.05);
+    --border: rgba(255,255,255,0.08); --border-hover: rgba(255,255,255,0.16);
+    --text: #e8ecf5; --text-dim: #8b94ab; --text-dimmer: #5a6378;
+    --green: #22c55e; --green-glow: rgba(34,197,94,0.35);
+    --blue: #3b82f6; --blue-glow: rgba(59,130,246,0.35);
+    --gold: #f5b945;
+    --radius: 16px; --radius-sm: 10px;
+  }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Arial, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.5;
+    -webkit-font-smoothing: antialiased; overflow-x: hidden;
+    position: relative; min-height: 100vh;
+  }
+  body::before {
+    content: ""; position: fixed; top: -20%; left: 50%; transform: translateX(-50%);
+    width: 900px; height: 900px;
+    background: radial-gradient(circle, rgba(34,197,94,0.10) 0%, transparent 60%);
+    pointer-events: none; z-index: 0;
+  }
+  body::after {
+    content: ""; position: fixed; bottom: -30%; right: -10%;
+    width: 700px; height: 700px;
+    background: radial-gradient(circle, rgba(59,130,246,0.08) 0%, transparent 60%);
+    pointer-events: none; z-index: 0;
+  }
+  .container { max-width: 960px; margin: 0 auto; padding: 0 20px; position: relative; z-index: 1; }
+  nav { display: flex; align-items: center; justify-content: space-between; padding: 20px 0; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }
+  .brand-logo { width: 34px; height: 34px; border-radius: 10px;
+    background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 0 20px var(--green-glow); flex-shrink: 0; }
+  .brand-logo svg { width: 18px; height: 18px; }
+  .nav-cta { color: var(--text-dim); text-decoration: none; font-size: 13px; font-weight: 500;
+    padding: 8px 14px; border: 1px solid var(--border); border-radius: 999px; transition: all 0.2s; }
+  .nav-cta:hover { border-color: var(--border-hover); color: var(--text); }
+  .hero { text-align: center; padding: 40px 0 32px; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px;
+    border-radius: 999px; background: rgba(34,197,94,0.08); border: 1px solid rgba(34,197,94,0.20);
+    color: #4ade80; font-size: 12px; font-weight: 600; margin-bottom: 20px; letter-spacing: 0.02em; }
+  .badge-dot { width: 6px; height: 6px; border-radius: 50%; background: #22c55e;
+    box-shadow: 0 0 8px #22c55e; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+  h1 { font-size: 40px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.1;
+    margin-bottom: 14px; background: linear-gradient(180deg, #ffffff 0%, #b8c1d6 100%);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+  .hero p { color: var(--text-dim); font-size: 16px; max-width: 520px; margin: 0 auto 28px; }
+  .trust-row { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-bottom: 8px; }
+  .trust-pill { display: inline-flex; align-items: center; gap: 7px; padding: 8px 14px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 999px;
+    font-size: 12.5px; color: var(--text-dim); font-weight: 500; }
+  .trust-pill svg { width: 14px; height: 14px; color: var(--green); }
+  .plans { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 40px 0 60px; }
+  .plan { position: relative; background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 28px 24px; transition: all 0.25s ease; overflow: hidden; }
+  .plan:hover { background: var(--card-hover); border-color: var(--border-hover); transform: translateY(-2px); }
+  .plan.featured { border-color: rgba(59,130,246,0.4);
+    background: linear-gradient(180deg, rgba(59,130,246,0.06) 0%, rgba(59,130,246,0.02) 100%);
+    box-shadow: 0 20px 60px -20px var(--blue-glow); }
+  .plan.featured:hover { border-color: rgba(59,130,246,0.6); }
+  .ribbon { position: absolute; top: 14px; right: 14px; padding: 4px 10px;
+    background: linear-gradient(135deg, #3b82f6, #2563eb); color: white;
+    font-size: 10.5px; font-weight: 700; border-radius: 6px; letter-spacing: 0.05em;
+    text-transform: uppercase; box-shadow: 0 4px 12px rgba(59,130,246,0.4); }
+  .plan-name { font-size: 13px; font-weight: 600; color: var(--text-dim);
+    letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 12px; }
+  .plan-price { display: flex; align-items: baseline; gap: 6px; margin-bottom: 6px; }
+  .plan-price .amount { font-size: 38px; font-weight: 700; letter-spacing: -0.03em; line-height: 1; }
+  .plan-price .period { font-size: 15px; color: var(--text-dim); font-weight: 500; }
+  .plan-sub { color: var(--text-dimmer); font-size: 13px; margin-bottom: 22px; }
+  .plan-sub strong { color: #4ade80; font-weight: 600; }
+  .plan-features { list-style: none; margin-bottom: 24px; }
+  .plan-features li { display: flex; align-items: flex-start; gap: 10px; padding: 7px 0; font-size: 14px; color: var(--text); }
+  .plan-features li svg { width: 16px; height: 16px; color: var(--green); flex-shrink: 0; margin-top: 3px; }
+  .btn { display: flex; align-items: center; justify-content: center; gap: 8px;
+    width: 100%; padding: 15px 20px; border-radius: var(--radius-sm); font-size: 15px;
+    font-weight: 600; text-decoration: none; border: none; cursor: pointer;
+    transition: all 0.2s; font-family: inherit; position: relative; overflow: hidden; }
+  .btn-primary { background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+    color: white; box-shadow: 0 8px 24px -8px var(--green-glow); }
+  .btn-primary:hover { box-shadow: 0 12px 32px -8px var(--green-glow); transform: translateY(-1px); }
+  .btn-blue { background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+    color: white; box-shadow: 0 8px 24px -8px var(--blue-glow); }
+  .btn-blue:hover { box-shadow: 0 12px 32px -8px var(--blue-glow); transform: translateY(-1px); }
+  .btn:disabled { opacity: 0.7; cursor: not-allowed; transform: none !important; }
+  .btn .spinner { width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: white; border-radius: 50%; animation: spin 0.7s linear infinite; display: none; }
+  .btn.loading .spinner { display: block; }
+  .btn.loading .btn-label { display: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  section { padding: 40px 0; }
+  .section-title { text-align: center; font-size: 24px; font-weight: 700;
+    letter-spacing: -0.02em; margin-bottom: 8px; }
+  .section-sub { text-align: center; color: var(--text-dim); font-size: 14px; margin-bottom: 32px; }
+  .features-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .feature-card { background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 22px 20px; transition: all 0.2s; }
+  .feature-card:hover { background: var(--card-hover); border-color: var(--border-hover); }
+  .feature-icon { width: 40px; height: 40px; border-radius: 10px;
+    background: rgba(34,197,94,0.10); display: flex; align-items: center; justify-content: center;
+    margin-bottom: 14px; }
+  .feature-icon svg { width: 20px; height: 20px; color: var(--green); }
+  .feature-card h3 { font-size: 15px; font-weight: 600; margin-bottom: 6px; letter-spacing: -0.01em; }
+  .feature-card p { font-size: 13.5px; color: var(--text-dim); line-height: 1.55; }
+  .testimonials { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .testimonial { background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 22px 20px; }
+  .stars { color: var(--gold); font-size: 14px; margin-bottom: 10px; letter-spacing: 2px; }
+  .testimonial p { font-size: 14px; color: var(--text); line-height: 1.6; margin-bottom: 14px; }
+  .testimonial-author { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-dim); }
+  .avatar { width: 32px; height: 32px; border-radius: 50%;
+    background: linear-gradient(135deg, #3b82f6, #2563eb); display: flex; align-items: center;
+    justify-content: center; color: white; font-weight: 600; font-size: 13px; }
+  .faq-list { max-width: 680px; margin: 0 auto; }
+  .faq-item { border-bottom: 1px solid var(--border); }
+  .faq-item:first-child { border-top: 1px solid var(--border); }
+  .faq-q { display: flex; justify-content: space-between; align-items: center;
+    padding: 20px 4px; cursor: pointer; font-size: 15px; font-weight: 500; color: var(--text);
+    user-select: none; transition: color 0.2s; }
+  .faq-q:hover { color: #4ade80; }
+  .faq-q svg { width: 18px; height: 18px; color: var(--text-dim); transition: transform 0.25s; flex-shrink: 0; }
+  .faq-item.open .faq-q svg { transform: rotate(45deg); color: #4ade80; }
+  .faq-a { max-height: 0; overflow: hidden;
+    transition: max-height 0.3s ease, padding 0.3s ease; color: var(--text-dim);
+    font-size: 14px; line-height: 1.65; padding: 0 4px; }
+  .faq-item.open .faq-a { max-height: 300px; padding: 0 4px 20px; }
+  footer { border-top: 1px solid var(--border); padding: 28px 0 40px;
+    margin-top: 40px; text-align: center; font-size: 12.5px; color: var(--text-dimmer); }
+  footer a { color: var(--text-dim); text-decoration: none; }
+  footer a:hover { color: var(--text); }
+  .footer-links { display: flex; justify-content: center; flex-wrap: wrap; gap: 20px; margin-bottom: 14px; }
+  .disclaimer { max-width: 500px; margin: 14px auto 0; font-size: 11.5px; line-height: 1.55; color: var(--text-dimmer); }
+  @media (max-width: 720px) {
+    h1 { font-size: 30px; } .hero { padding: 24px 0 20px; }
+    .plans { grid-template-columns: 1fr; gap: 16px; margin: 28px 0 40px; }
+    .features-grid, .testimonials { grid-template-columns: 1fr; }
+    .plan-price .amount { font-size: 32px; } section { padding: 28px 0; }
+    .section-title { font-size: 20px; }
+  }
+  @media (max-width: 420px) {
+    .container { padding: 0 16px; } h1 { font-size: 26px; } .brand { font-size: 15px; }
+    .trust-pill { font-size: 11.5px; padding: 7px 11px; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <nav>
+    <div class="brand">
+      <div class="brand-logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+        </svg>
+      </div>
+      <span>BetMaster Pro</span>
+    </div>
+    <a class="nav-cta" href="{{BOT_LINK}}">Open Bot</a>
+  </nav>
+
+  <section class="hero">
+    <div class="badge">
+      <span class="badge-dot"></span>
+      Limited-Time Offer · Save 40%
+    </div>
+    <h1>Unlock AI-Powered<br>Football Predictions</h1>
+    <p>Dixon-Coles statistical model · Value-bet detection · Global league coverage. Join thousands of smart bettors winning every week.</p>
+    <div class="trust-row">
+      <div class="trust-pill">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        SSL Secured
+      </div>
+      <div class="trust-pill">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        Flutterwave
+      </div>
+      <div class="trust-pill">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
+        Trusted by 5,000+
+      </div>
+    </div>
+  </section>
+
+  <section style="padding-top: 0;">
+    <div class="plans">
+      <div class="plan">
+        <div class="plan-name">Weekly</div>
+        <div class="plan-price">
+          <span class="amount">₦2,000</span>
+          <span class="period">/ week</span>
+        </div>
+        <div class="plan-sub">Perfect for <strong>trying us out</strong></div>
+        <ul class="plan-features">
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>10 predictions per day</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Full Dixon-Coles analysis</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Value-bet alerts</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>All leagues: EU · Asia · Americas</li>
+        </ul>
+        <a href="/pay?plan=weekly&uid={{UID}}" class="btn btn-primary" onclick="return startPay(this)">
+          <span class="spinner"></span>
+          <span class="btn-label">Get Weekly Access</span>
+        </a>
+      </div>
+
+      <div class="plan featured">
+        <div class="ribbon">Best Value</div>
+        <div class="plan-name">Monthly</div>
+        <div class="plan-price">
+          <span class="amount">₦5,000</span>
+          <span class="period">/ month</span>
+        </div>
+        <div class="plan-sub">Save <strong>₦3,000</strong> vs weekly</div>
+        <ul class="plan-features">
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Everything in Weekly</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>10-match VIP accumulator slips</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Priority support &amp; updates</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Early access to new features</li>
+        </ul>
+        <a href="/pay?plan=monthly&uid={{UID}}" class="btn btn-blue" onclick="return startPay(this)">
+          <span class="spinner"></span>
+          <span class="btn-label">Get Monthly Access</span>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-title">Why BetMaster Pro?</div>
+    <div class="section-sub">Built with the same models used by professional sportsbooks.</div>
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>
+        </div>
+        <h3>Dixon-Coles Model</h3>
+        <p>The industry-standard bivariate Poisson model used by professional bookmakers. Calculates exact scoreline probabilities.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+        </div>
+        <h3>Real-Time Analysis</h3>
+        <p>Live odds comparison across Bet365, Pinnacle and more. We find where the bookies got the price wrong.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+        </div>
+        <h3>Global Coverage</h3>
+        <p>From the Premier League to the Chinese Super League, MLS and FIFA internationals. 200+ leagues, one bot.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-title">Loved by Bettors</div>
+    <div class="section-sub">Join our growing community of winners.</div>
+    <div class="testimonials">
+      <div class="testimonial">
+        <div class="stars">★★★★★</div>
+        <p>"Won 3 accumulators in my first week. The value-bet alerts are a game changer."</p>
+        <div class="testimonial-author">
+          <div class="avatar">E</div>
+          <span>Emeka · Lagos</span>
+        </div>
+      </div>
+      <div class="testimonial">
+        <div class="stars">★★★★★</div>
+        <p>"Finally a bot that actually explains its reasoning. The Dixon-Coles model is legit."</p>
+        <div class="testimonial-author">
+          <div class="avatar">T</div>
+          <span>Tunde · Abuja</span>
+        </div>
+      </div>
+      <div class="testimonial">
+        <div class="stars">★★★★★</div>
+        <p>"I stopped guessing. This pays for itself every single month."</p>
+        <div class="testimonial-author">
+          <div class="avatar">C</div>
+          <span>Chidi · Port Harcourt</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-title">Frequently Asked</div>
+    <div class="section-sub">Quick answers to common questions.</div>
+    <div class="faq-list">
+      <div class="faq-item">
+        <div class="faq-q">How do I receive predictions after paying?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div>
+        <div class="faq-a">Once payment is confirmed, your Telegram account is instantly upgraded. Return to the bot and use /today, /europeanleagues, /asianleagues, /americanleagues or /national to access your daily predictions.</div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q">What payment methods do you accept?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div>
+        <div class="faq-a">We accept all cards (Visa, Mastercard, Verve), bank transfers, USSD, and mobile money through Flutterwave — Nigeria's most trusted payment processor.</div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q">Can I cancel anytime?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div>
+        <div class="faq-a">Yes. There are no contracts. Your VIP access runs until the expiry date and simply won't renew. You can restart whenever you like.</div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q">Is my payment secure?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div>
+        <div class="faq-a">Absolutely. All payments are processed by Flutterwave, PCI-DSS Level 1 certified. We never see or store your card details.</div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q">Do you guarantee winnings?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div>
+        <div class="faq-a">No legitimate service can guarantee winnings. Our model provides statistically-backed predictions with measurable edge over bookmaker odds — the same approach used by professional bettors. Always bet responsibly.</div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="footer-links">
+      <a href="{{BOT_LINK}}">Telegram Bot</a>
+      <a href="/">Status</a>
+      <a href="mailto:support@betmasterpro.com">Support</a>
+    </div>
+    <div>© {{YEAR}} BetMaster Pro. All rights reserved.</div>
+    <div class="disclaimer">
+      18+ only. Gambling involves risk. Bet only what you can afford to lose. If you need help, contact the National Problem Gambling Helpline.
+    </div>
+  </footer>
+</div>
+<script>
+  document.querySelectorAll('.faq-q').forEach(function(q) {
+    q.addEventListener('click', function() {
+      var item = q.parentElement;
+      item.classList.toggle('open');
+    });
+  });
+  function startPay(btn) {
+    btn.classList.add('loading');
+    btn.disabled = true;
+    return true;
+  }
+</script>
+</body>
+</html>"""
+
+
+SUCCESS_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0a0e1a">
+<title>Payment Successful — BetMaster Pro</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Arial, sans-serif;
+    background: #0a0e1a; color: #e8ecf5; min-height: 100vh; display: flex;
+    align-items: center; justify-content: center; padding: 24px; position: relative; overflow: hidden; }
+  body::before { content: ""; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 700px; height: 700px; background: radial-gradient(circle, rgba(34,197,94,0.15) 0%, transparent 60%);
+    pointer-events: none; }
+  .card { position: relative; background: rgba(255,255,255,0.03); border: 1px solid rgba(34,197,94,0.25);
+    border-radius: 20px; padding: 48px 36px; max-width: 440px; width: 100%; text-align: center;
+    box-shadow: 0 30px 80px -30px rgba(34,197,94,0.4); }
+  .check { width: 80px; height: 80px; border-radius: 50%;
+    background: linear-gradient(135deg, #22c55e, #16a34a); display: flex; align-items: center;
+    justify-content: center; margin: 0 auto 24px; box-shadow: 0 0 40px rgba(34,197,94,0.5);
+    animation: pop 0.5s cubic-bezier(0.68,-0.55,0.27,1.55); }
+  @keyframes pop { 0% { transform: scale(0); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+  .check svg { width: 40px; height: 40px; }
+  h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 10px;
+    background: linear-gradient(180deg, #fff 0%, #b8c1d6 100%); -webkit-background-clip: text;
+    background-clip: text; -webkit-text-fill-color: transparent; }
+  p { color: #8b94ab; font-size: 15px; line-height: 1.6; margin-bottom: 28px; }
+  .plan-badge { display: inline-block; padding: 6px 14px; background: rgba(34,197,94,0.1);
+    border: 1px solid rgba(34,197,94,0.25); border-radius: 999px; color: #4ade80;
+    font-size: 13px; font-weight: 600; margin-bottom: 20px; letter-spacing: 0.05em; text-transform: uppercase; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 15px 28px; background: linear-gradient(135deg, #22c55e, #16a34a); color: white;
+    text-decoration: none; border-radius: 12px; font-weight: 600; font-size: 15px;
+    box-shadow: 0 10px 30px -10px rgba(34,197,94,0.5); transition: all 0.2s; width: 100%; }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 15px 40px -10px rgba(34,197,94,0.6); }
+  .btn svg { width: 18px; height: 18px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="check">
+    <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="20 6 9 17 4 12"/>
+    </svg>
+  </div>
+  <div class="plan-badge">{{PLAN}} Activated</div>
+  <h1>Welcome to VIP!</h1>
+  <p>Your payment was confirmed and your account has been upgraded. Return to the bot to start receiving premium AI predictions.</p>
+  <a href="{{BOT_LINK}}" class="btn">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>
+    </svg>
+    Open Telegram Bot
+  </a>
+</div>
+</body>
+</html>"""
+
+
+FAILED_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0a0e1a">
+<title>Payment Issue — BetMaster Pro</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, Arial, sans-serif;
+    background: #0a0e1a; color: #e8ecf5; min-height: 100vh; display: flex;
+    align-items: center; justify-content: center; padding: 24px; position: relative; overflow: hidden; }
+  body::before { content: ""; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 700px; height: 700px; background: radial-gradient(circle, rgba(239,68,68,0.12) 0%, transparent 60%);
+    pointer-events: none; }
+  .card { position: relative; background: rgba(255,255,255,0.03); border: 1px solid rgba(239,68,68,0.25);
+    border-radius: 20px; padding: 48px 36px; max-width: 440px; width: 100%; text-align: center;
+    box-shadow: 0 30px 80px -30px rgba(239,68,68,0.35); }
+  .icon { width: 80px; height: 80px; border-radius: 50%;
+    background: linear-gradient(135deg, #ef4444, #dc2626); display: flex; align-items: center;
+    justify-content: center; margin: 0 auto 24px; box-shadow: 0 0 40px rgba(239,68,68,0.4); }
+  .icon svg { width: 40px; height: 40px; }
+  h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 10px; color: #fca5a5; }
+  p { color: #8b94ab; font-size: 15px; line-height: 1.6; margin-bottom: 12px; }
+  .reason { background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 10px; padding: 14px 16px; font-size: 13px; color: #cbd5e1;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; margin: 20px 0 24px;
+    word-break: break-word; text-align: left; }
+  .actions { display: flex; flex-direction: column; gap: 10px; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 14px 24px; border-radius: 12px; font-weight: 600; font-size: 14.5px;
+    text-decoration: none; transition: all 0.2s; width: 100%; }
+  .btn-primary { background: linear-gradient(135deg, #22c55e, #16a34a); color: white;
+    box-shadow: 0 10px 30px -10px rgba(34,197,94,0.5); }
+  .btn-primary:hover { transform: translateY(-1px); }
+  .btn-secondary { background: transparent; color: #8b94ab; border: 1px solid rgba(255,255,255,0.1); }
+  .btn-secondary:hover { color: #e8ecf5; border-color: rgba(255,255,255,0.2); }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">
+    <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+    </svg>
+  </div>
+  <h1>Payment Not Confirmed</h1>
+  <p>We couldn't verify your transaction. If you were charged, please contact support with the reference below.</p>
+  <div class="reason">{{REASON}}</div>
+  <div class="actions">
+    <a href="/subscribe?uid={{UID}}" class="btn btn-primary">Try Again</a>
+    <a href="{{BOT_LINK}}" class="btn btn-secondary">Contact Support</a>
+  </div>
+</div>
+</body>
+</html>"""
+
+
+def render_payment_page(uid: str) -> str:
+    from datetime import datetime as _dt
+    return (PAYMENT_TEMPLATE
+            .replace("{{UID}}", str(uid))
+            .replace("{{BOT_LINK}}", BOT_LINK)
+            .replace("{{BOT_HANDLE}}", BOT_HANDLE)
+            .replace("{{YEAR}}", str(_dt.now().year)))
+
+
+def render_success_page(plan: str) -> str:
+    return (SUCCESS_TEMPLATE
+            .replace("{{PLAN}}", plan.upper())
+            .replace("{{BOT_LINK}}", BOT_LINK))
+
+
+def render_failed_page(reason: str, uid: str = "") -> str:
+    import html
+    return (FAILED_TEMPLATE
+            .replace("{{REASON}}", html.escape(str(reason))[:500])
+            .replace("{{UID}}", str(uid))
+            .replace("{{BOT_LINK}}", BOT_LINK))
+
+
+# ──────────────────────────────────────────────
+# TELEGRAM APP
 # ──────────────────────────────────────────────
 app = FastAPI()
 
@@ -895,9 +1335,6 @@ def activate_vip(uid, plan):
         db.close()
 
 
-# ──────────────────────────────────────────────
-# REGION / COMMAND HANDLERS
-# ──────────────────────────────────────────────
 REGION_INFO = {
     "european": ("🇪🇺 EUROPEAN LEAGUES", "European"),
     "asian":    ("🇯🇵 ASIAN LEAGUES",    "Asian"),
@@ -907,7 +1344,6 @@ REGION_INFO = {
 
 
 def handle_region(chat_id, user_id, region, user, db, limit):
-    """Generic handler for /europeanleagues /asianleagues /americanleagues /national."""
     header, pretty = REGION_INFO.get(region, ("FIXTURES", region.title()))
 
     if user.daily_count >= limit:
@@ -921,7 +1357,6 @@ def handle_region(chat_id, user_id, region, user, db, limit):
     fixtures = fetch_real_fixtures(days_ahead=0, limit=15, region=region)
 
     if not fixtures:
-        # Try next few days
         for i in range(1, 8):
             fixtures = fetch_real_fixtures(days_ahead=i, limit=15, region=region)
             if fixtures:
@@ -947,8 +1382,7 @@ def handle_region(chat_id, user_id, region, user, db, limit):
     send_message(chat_id, msg, reply_markup=keyboard)
 
 
-def send_full_prediction(chat_id, fixture, user, db, limit):
-    """Send detailed prediction for one fixture."""
+def send_full_prediction(chat_id, fixture):
     p = predict_match(fixture)
     msg = (
         f"⚽ {fixture['home']} vs {fixture['away']}\n"
@@ -982,7 +1416,6 @@ def process_update(upd):
     try:
         base = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-        # ── Callback queries ──
         if "callback_query" in upd:
             cq = upd["callback_query"]
             chat_id = cq["message"]["chat"]["id"]
@@ -1021,7 +1454,7 @@ def process_update(upd):
                     for f in fixtures[:5]:
                         if user2.daily_count >= limit:
                             break
-                        send_full_prediction(chat_id, f, user2, db2, limit)
+                        send_full_prediction(chat_id, f)
                         user2.daily_count += 1
                         db2.commit()
                         time.sleep(0.8)
@@ -1042,7 +1475,7 @@ def process_update(upd):
                     for f in fixtures[:5]:
                         if user2.daily_count >= limit:
                             break
-                        send_full_prediction(chat_id, f, user2, db2, limit)
+                        send_full_prediction(chat_id, f)
                         user2.daily_count += 1
                         db2.commit()
                         time.sleep(0.8)
@@ -1084,7 +1517,6 @@ def process_update(upd):
                 db2.close()
             return
 
-        # ── Messages ──
         msg = upd.get("message")
         if not msg or "text" not in msg or msg["chat"]["type"] != "private":
             return
@@ -1100,7 +1532,6 @@ def process_update(upd):
             FREE, VIP = 2, 10
             cur = VIP if user.is_vip else FREE
 
-            # ── /start ──
             if low.startswith("/start"):
                 send_message(chat_id, (
                     f"👋 Welcome to BetMaster Pro\n\n"
@@ -1119,7 +1550,6 @@ def process_update(upd):
                     f"{BOT_LINK}"
                 ))
 
-            # ── /help ──
             elif low.startswith("/help"):
                 send_message(chat_id, (
                     f"📖 BetMaster Pro Help\n\n"
@@ -1130,11 +1560,10 @@ def process_update(upd):
                     f"• /national — FIFA national team fixtures\n"
                     f"• /betslip — VIP 10-match accumulator\n"
                     f"• /upgrade — VIP plans\n\n"
-                    f"Or send: `Team A vs Team B` for instant analysis.\n\n"
+                    f"Or send: Team A vs Team B for instant analysis.\n\n"
                     f"FREE {FREE}/day · VIP {VIP}/day\n{BOT_LINK}"
                 ))
 
-            # ── Region commands ──
             elif low.startswith("/europeanleagues"):
                 handle_region(chat_id, user_id, "european", user, db, cur)
 
@@ -1147,7 +1576,6 @@ def process_update(upd):
             elif low.startswith("/national"):
                 handle_region(chat_id, user_id, "national", user, db, cur)
 
-            # ── /today ──
             elif low.startswith("/today"):
                 if user.daily_count >= cur:
                     send_message(chat_id,
@@ -1174,7 +1602,6 @@ def process_update(upd):
                 ]]}
                 send_message(chat_id, msg_txt, reply_markup=keyboard)
 
-            # ── /betslip ──
             elif low.startswith("/betslip"):
                 if not user.is_vip:
                     send_message(chat_id,
@@ -1193,7 +1620,6 @@ def process_update(upd):
                             f"N2000 → N{slip['winnings_2000']}\n{BOT_LINK}")
                 send_message(chat_id, msg_txt)
 
-            # ── /upgrade ──
             elif low.startswith("/upgrade"):
                 send_message(chat_id, (
                     f"💎 VIP Benefits\n"
@@ -1206,7 +1632,6 @@ def process_update(upd):
                     f"{RENDER_URL}/subscribe?uid={user_id}"
                 ))
 
-            # ── Team vs Team manual query ──
             elif " vs " in low and 5 < len(text) < 100:
                 if user.daily_count >= cur:
                     send_message(chat_id,
@@ -1219,17 +1644,15 @@ def process_update(upd):
                     home = parts[0].strip().title()
                     away = parts[1].strip().title()
                 except Exception:
-                    send_message(chat_id, "Format: `Team A vs Team B`")
+                    send_message(chat_id, "Format: Team A vs Team B")
                     return
 
-                # Try to find in today's fixtures for accurate league/odds
                 all_f = fetch_real_fixtures(days_ahead=0, limit=100)
                 matched = next((f for f in all_f
                                 if home.lower() in f["home"].lower()
                                 and away.lower() in f["away"].lower()), None)
 
                 if not matched:
-                    # Try reversed
                     matched = next((f for f in all_f
                                     if away.lower() in f["home"].lower()
                                     and home.lower() in f["away"].lower()), None)
@@ -1269,8 +1692,7 @@ def process_update(upd):
                 send_message(chat_id, msg_txt)
 
             else:
-                send_message(chat_id,
-                             f"Unknown command. Try /help\n{BOT_LINK}")
+                send_message(chat_id, f"Unknown command. Try /help\n{BOT_LINK}")
 
         except Exception as e:
             print(f"Handler error: {e}")
@@ -1296,7 +1718,6 @@ def channel_scheduler():
             hm = now_wat.strftime("%H:%M")
             today_str = now_wat.strftime("%Y-%m-%d")
 
-            # 6 AM — morning picks
             if hm == "06:00" and f"{today_str}-6am" not in posted_today:
                 try:
                     fixtures = fetch_real_fixtures(days_ahead=0, limit=5)
@@ -1313,7 +1734,6 @@ def channel_scheduler():
                     print(f"6AM error: {e}")
                 posted_today.add(f"{today_str}-6am")
 
-            # 8 AM — top 5 picks
             if hm == "08:00" and f"{today_str}-8am" not in posted_today:
                 try:
                     fixtures = fetch_real_fixtures(days_ahead=0, limit=10)
@@ -1330,7 +1750,6 @@ def channel_scheduler():
                     print(f"8AM error: {e}")
                 posted_today.add(f"{today_str}-8am")
 
-            # 9 PM — tomorrow preview
             if hm == "21:00" and f"{today_str}-9pm" not in posted_today:
                 try:
                     fixtures = fetch_real_fixtures(days_ahead=1, limit=5)
@@ -1464,74 +1883,110 @@ async def debug_predict(home: str = "Arsenal", away: str = "Chelsea",
         return {"error": str(e), "trace": traceback.format_exc()}
 
 
+# ──────────────────────────────────────────────
+# PAYMENT ROUTES
+# ──────────────────────────────────────────────
 @app.get("/subscribe", response_class=HTMLResponse)
 async def subscribe(request: Request):
     uid = request.query_params.get("uid", "")
-    return HTMLResponse(f"""
-    <html><body style='background:#0f172a;color:white;text-align:center;
-    padding:20px;font-family:sans-serif'>
-    <div style='background:#1e293b;padding:20px;border-radius:15px;
-    max-width:400px;margin:auto'>
-    <h2>💎 BetMaster Pro VIP</h2>
-    <p>10 predictions/day · 10-match betslip · Value-bet alerts<br>
-    Dixon-Coles AI · Global coverage</p>
-    <a href='/pay?plan=weekly&uid={uid}'
-       style='display:block;padding:15px;background:#22c55e;color:white;
-       border-radius:10px;text-decoration:none;margin:10px 0'>
-       Weekly — N2000</a>
-    <a href='/pay?plan=monthly&uid={uid}'
-       style='display:block;padding:15px;background:#3b82f6;color:white;
-       border-radius:10px;text-decoration:none'>
-       Monthly — N5000</a>
-    <p>{BOT_LINK}</p>
-    </div></body></html>
-    """)
+    return HTMLResponse(render_payment_page(uid))
 
 
 @app.get("/pay")
 async def pay(plan: str, uid: str):
     if not FLW_SECRET:
-        return JSONResponse({"error": "No FLW secret key"}, status_code=500)
+        return HTMLResponse(
+            render_failed_page("Payment system is not configured. Please contact support.", uid),
+            status_code=500,
+        )
+
+    if plan not in ("weekly", "monthly"):
+        return HTMLResponse(
+            render_failed_page(f"Invalid plan: {plan}", uid),
+            status_code=400,
+        )
+
     amount = 2000 if plan == "weekly" else 5000
     tx_ref = f"BETMASTER-{uid}-{plan}-{int(time.time())}"
+
     payload = {
         "tx_ref": tx_ref,
         "amount": amount,
         "currency": "NGN",
         "redirect_url": f"{RENDER_URL}/verify?tx_ref={tx_ref}&uid={uid}&plan={plan}",
-        "customer": {"email": f"{uid}@betmasterpro.com", "name": f"User {uid}"},
-        "customizations": {"title": f"BetMaster Pro {plan.upper()}"},
+        "customer": {
+            "email": f"{uid}@betmasterpro.com",
+            "name": f"User {uid}",
+        },
+        "customizations": {
+            "title": f"BetMaster Pro — {plan.title()}",
+            "description": f"VIP access for {plan} plan",
+        },
+        "payment_options": "card,banktransfer,ussd,mobilemoney",
     }
     headers = {"Authorization": f"Bearer {FLW_SECRET}"}
+
     try:
-        r = requests.post("https://api.flutterwave.com/v3/payments",
-                          json=payload, headers=headers, timeout=15).json()
-        if r.get("status") == "success":
+        r = requests.post(
+            "https://api.flutterwave.com/v3/payments",
+            json=payload, headers=headers, timeout=20,
+        ).json()
+
+        if r.get("status") == "success" and r.get("data", {}).get("link"):
             return RedirectResponse(r["data"]["link"])
-        return JSONResponse(r, status_code=400)
+
+        err = r.get("message", "Could not create payment session")
+        return HTMLResponse(render_failed_page(err, uid), status_code=400)
+
+    except requests.exceptions.Timeout:
+        return HTMLResponse(
+            render_failed_page("Payment gateway timed out. Please try again.", uid),
+            status_code=504,
+        )
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return HTMLResponse(
+            render_failed_page(f"Unexpected error: {e}", uid),
+            status_code=500,
+        )
 
 
 @app.get("/verify")
 async def verify(tx_ref: str, uid: str, plan: str):
     headers = {"Authorization": f"Bearer {FLW_SECRET}"}
+
     try:
         r = requests.get(
             f"https://api.flutterwave.com/v3/transactions?tx_ref={tx_ref}",
-            headers=headers, timeout=15
+            headers=headers, timeout=20,
         ).json()
+
         if r.get("status") == "success" and r.get("data"):
             data = r["data"][0] if isinstance(r["data"], list) else r["data"]
-            if data.get("status") in ["successful", "completed"]:
+
+            if data.get("status") in ("successful", "completed"):
                 activate_vip(uid, plan)
-                return HTMLResponse(
-                    f"<h1>✅ {plan.upper()} activated!</h1>"
-                    f"<a href='{BOT_LINK}'>Return to bot</a>"
-                )
-        return HTMLResponse(f"<h1>Not confirmed: {tx_ref}</h1>")
+                return HTMLResponse(render_success_page(plan))
+
+            return HTMLResponse(
+                render_failed_page(f"Transaction status: {data.get('status', 'unknown')}", uid),
+                status_code=400,
+            )
+
+        return HTMLResponse(
+            render_failed_page("Transaction not found or already processed.", uid),
+            status_code=404,
+        )
+
+    except requests.exceptions.Timeout:
+        return HTMLResponse(
+            render_failed_page("Verification timed out. Please contact support with your reference.", uid),
+            status_code=504,
+        )
     except Exception as e:
-        return HTMLResponse(f"Error: {e}")
+        return HTMLResponse(
+            render_failed_page(f"Verification error: {e}", uid),
+            status_code=500,
+        )
 
 
 # ──────────────────────────────────────────────
