@@ -2342,4 +2342,41 @@ FAILED_TEMPLATE = r"""<!DOCTYPE html>
 </head>
 <body>
 <div class="card">
-  <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="
+  <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>
+  <h1>Payment Not Confirmed</h1>
+  <p>We couldn't verify your transaction. If you were charged, contact support with the reference below.</p>
+  <div class="reason">{{REASON}}</div>
+  <div class="actions">
+    <a href="/subscribe?uid={{UID}}" class="btn btn-primary">Try Again</a>
+    <a href="{{BOT_LINK}}" class="btn btn-secondary">Contact Support</a>
+  </div>
+</div>
+</body>
+</html>"""
+
+
+def render_payment_page(uid):
+    from datetime import datetime as _dt
+    return (PAYMENT_TEMPLATE
+            .replace("{{UID}}", str(uid))
+            .replace("{{BOT_LINK}}", BOT_LINK)
+            .replace("{{YEAR}}", str(_dt.now().year)))
+
+
+def render_success_page(plan):
+    return SUCCESS_TEMPLATE.replace("{{PLAN}}", plan.upper()).replace("{{BOT_LINK}}", BOT_LINK)
+
+
+def render_failed_page(reason, uid=""):
+    return (FAILED_TEMPLATE
+            .replace("{{REASON}}", html.escape(str(reason))[:500])
+            .replace("{{UID}}", str(uid))
+            .replace("{{BOT_LINK}}", BOT_LINK))
+
+
+# ──────────────────────────────────────────────
+# RUN
+# ──────────────────────────────────────────────
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
