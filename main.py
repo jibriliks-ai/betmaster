@@ -1,10 +1,9 @@
 """
-BetMaster Pro — Professional Sports Betting Bot
-Full feature set: Dixon-Coles modeling, engagement systems, VIP tiers,
-N1 Million accumulator generator, personalized predictions, payments.
+main.py — BetMaster Pro
+Global soccer prediction bot with Dixon-Coles modeling, value-bet detection,
+multi-region coverage, N1M challenge, engagement systems, and pro payment flow.
 
 Data sources: ESPN, TheSportsDB, OpenFootball, The Odds API.
-No API-Football dependency.
 """
 
 import os
@@ -87,23 +86,18 @@ class User(Base):
     is_vip = Column(Boolean, default=False)
     vip_expiry = Column(String, default="")
     vip_plan = Column(String, default="")
-    # Engagement
     streak = Column(Integer, default=0)
     best_streak = Column(Integer, default=0)
     total_predictions = Column(Integer, default=0)
     total_wins = Column(Integer, default=0)
     total_losses = Column(Integer, default=0)
-    # Referral
     referral_code = Column(String, default="", index=True)
     referred_by = Column(String, default="")
     referral_count = Column(Integer, default=0)
-    # Preferences (personalization)
-    fav_leagues = Column(Text, default="")  # comma-separated
-    fav_markets = Column(Text, default="")  # comma-separated
-    # N1M challenge
+    fav_leagues = Column(Text, default="")
+    fav_markets = Column(Text, default="")
     n1m_bankroll = Column(Float, default=0.0)
     n1m_best = Column(Float, default=0.0)
-    # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
     last_seen = Column(DateTime, default=datetime.utcnow)
 
@@ -118,7 +112,7 @@ class Prediction(Base):
     pick = Column(String)
     odds = Column(Float)
     confidence = Column(Float)
-    result = Column(String, default="pending")  # pending / win / loss
+    result = Column(String, default="pending")
     created_at = Column(DateTime, default=datetime.utcnow)
     match_date = Column(String)
 
@@ -170,17 +164,14 @@ def get_user(db, user_id, username="", first_name=""):
             db.commit()
             db.refresh(user)
             return user
-        # Daily reset
         if user.last_reset != today_str:
             user.daily_count = 0
             user.last_reset = today_str
             db.commit()
-        # VIP expiry
         if user.is_vip and user.vip_expiry and user.vip_expiry < today_str:
             user.is_vip = False
             user.vip_plan = ""
             db.commit()
-        # Update last seen
         user.last_seen = datetime.utcnow()
         if username and user.username != username:
             user.username = username
@@ -212,7 +203,7 @@ def activate_vip(uid, plan):
         user.daily_count = 0
         db.commit()
         send_message(int(uid), (
-            f"🎉 *VIP {plan.upper()} ACTIVATED!*\n\n"
+            f"🎉 VIP {plan.upper()} ACTIVATED!\n\n"
             f"Valid until: {expiry}\n\n"
             f"You now have:\n"
             f"✅ 10 predictions/day\n"
@@ -220,7 +211,7 @@ def activate_vip(uid, plan):
             f"✅ 10-match betslip generator\n"
             f"✅ Value-bet alerts\n\n"
             f"Open the bot: {BOT_LINK}"
-        ), parse_mode="Markdown")
+        ))
         return True
     except Exception as e:
         print(f"activate_vip error: {e}")
@@ -230,7 +221,7 @@ def activate_vip(uid, plan):
 
 
 # ──────────────────────────────────────────────
-# BRAIN: historical stats
+# BRAIN
 # ──────────────────────────────────────────────
 HISTORICAL_STATS = {}
 H2H_CACHE = {}
@@ -458,7 +449,6 @@ def find_value_bets(model_probs, odds):
 
 
 def predict_match(data):
-    """Master prediction engine — Dixon-Coles + H2H + value bets."""
     home = data.get("home", "Home")
     away = data.get("away", "Away")
     league_code = data.get("country", "E0")
@@ -750,29 +740,26 @@ def fetch_real_fixtures(days_ahead=0, limit=10, region=None):
 # PERSONALIZATION
 # ──────────────────────────────────────────────
 def update_user_preferences(db, user, fixture, market):
-    """Learn user's favorite leagues/markets over time."""
     try:
         fav_l = set((user.fav_leagues or "").split(",")) - {""}
         if fixture.get("league"):
             fav_l.add(fixture["league"])
-        user.fav_leagues = ",".join(list(fav_l)[-10:])  # Keep last 10
+        user.fav_leagues = ",".join(list(fav_l)[-10:])
 
         fav_m = set((user.fav_markets or "").split(",")) - {""}
         if market:
             fav_m.add(market)
-        user.fav_markets = ",".join(list(fav_m)[-5:])  # Keep last 5
+        user.fav_markets = ",".join(list(fav_m)[-5:])
         db.commit()
     except Exception as e:
         print(f"Pref update error: {e}")
 
 
 def score_fixture_for_user(fixture, user):
-    """Higher score = more relevant for this user."""
     score = 0
     fav_leagues = set((user.fav_leagues or "").split(",")) - {""}
     if fixture.get("league") in fav_leagues:
         score += 50
-    # Top leagues always get a boost
     league = fixture.get("league", "").lower()
     if any(k in league for k in ["premier league", "la liga", "serie a",
                                   "bundesliga", "ligue 1", "champions league"]):
@@ -781,16 +768,10 @@ def score_fixture_for_user(fixture, user):
 
 
 # ──────────────────────────────────────────────
-# N1 MILLION ACCUMULATOR
+# N1M ACCUMULATOR
 # ──────────────────────────────────────────────
 def generate_n1m_slip(fixtures, user, stake=1000.0, target=1000000.0):
-    """
-    Build a high-odds accumulator: N1,000 → N1,000,000 (needs total odds ~1000).
-    Personalizes to user's favorite leagues when possible.
-    """
-    target_odds = target / stake  # = 1000.0
-
-    # Score all fixtures for this user
+    target_odds = target / stake
     scored = [(f, score_fixture_for_user(f, user)) for f in fixtures]
     scored.sort(key=lambda x: x[1], reverse=True)
 
@@ -800,34 +781,24 @@ def generate_n1m_slip(fixtures, user, stake=1000.0, target=1000000.0):
     for fixture, _ in scored:
         if total_odds >= target_odds:
             break
-
         p = predict_match(fixture)
-
-        # Pick the highest-confidence market for this fixture
         best = None
         for m in p["all_markets"]:
             if m["odds"] and 1.2 <= m["odds"] <= 5.0 and m["conf"] >= 50:
                 if best is None or m["conf"] > best["conf"]:
                     best = m
-
         if not best:
             continue
-
-        # Avoid duplicate matches
         if any(pk["match"] == f"{fixture['home']} vs {fixture['away']}" for pk in picks):
             continue
-
         picks.append({
             "match": f"{fixture['home']} vs {fixture['away']}",
             "league": fixture.get("league", ""),
-            "market": best["market"],
-            "pick": best["pick"],
-            "odds": float(best["odds"]),
-            "conf": best["conf"],
+            "market": best["market"], "pick": best["pick"],
+            "odds": float(best["odds"]), "conf": best["conf"],
             "reason": best["reason"],
         })
         total_odds *= float(best["odds"])
-
         if len(picks) >= 15:
             break
 
@@ -835,21 +806,18 @@ def generate_n1m_slip(fixtures, user, stake=1000.0, target=1000000.0):
     potential_win = round(stake * total_odds, 2)
 
     return {
-        "picks": picks,
-        "total_odds": total_odds,
-        "stake": stake,
+        "picks": picks, "total_odds": total_odds, "stake": stake,
         "potential_win": potential_win,
         "target_met": potential_win >= target * 0.9,
     }
 
 
 # ──────────────────────────────────────────────
-# BETSLIP (10-match)
+# BETSLIP
 # ──────────────────────────────────────────────
 def generate_betslip(fixtures, user=None):
     if len(fixtures) < 5:
         return None
-
     if user:
         scored = [(f, score_fixture_for_user(f, user)) for f in fixtures]
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -862,10 +830,8 @@ def generate_betslip(fixtures, user=None):
         picks.append({
             "match": f"{f['home']} vs {f['away']}",
             "league": f.get("league", ""),
-            "pick": p["best_pick"],
-            "odds": p["odds"],
-            "market": p["best_market"],
-            "conf": p["confidence"],
+            "pick": p["best_pick"], "odds": p["odds"],
+            "market": p["best_market"], "conf": p["confidence"],
         })
         total *= float(p["odds"])
 
@@ -880,29 +846,6 @@ def generate_betslip(fixtures, user=None):
 # ──────────────────────────────────────────────
 # ENGAGEMENT HELPERS
 # ──────────────────────────────────────────────
-def get_daily_recap(db):
-    """Yesterday's results from tracked predictions."""
-    try:
-        yesterday = str(date.today() - timedelta(days=1))
-        preds = db.query(Prediction).filter(Prediction.match_date == yesterday).all()
-        if not preds:
-            return None
-        wins = sum(1 for p in preds if p.result == "win")
-        losses = sum(1 for p in preds if p.result == "loss")
-        total = wins + losses
-        if total == 0:
-            return None
-        profit = sum(p.odds - 1 for p in preds if p.result == "win") - losses
-        return {
-            "wins": wins, "losses": losses, "total": total,
-            "profit": round(profit, 2),
-            "preds": preds[:5],
-        }
-    except Exception as e:
-        print(f"Recap error: {e}")
-        return None
-
-
 def get_user_stats(db, uid):
     try:
         user = get_user(db, uid)
@@ -924,24 +867,20 @@ def get_user_stats(db, uid):
 
 
 def award_referral(db, referrer_code, new_user_id):
-    """Reward referrer with 7 free VIP days when referred user pays."""
     try:
         referrer = db.query(User).filter(User.referral_code == referrer_code).first()
         if not referrer:
             return
-        # Check not already rewarded
         existing = db.query(Referral).filter(
             Referral.referrer_id == referrer.user_id,
             Referral.referred_id == new_user_id,
         ).first()
         if existing:
             return
-
         referral = Referral(referrer_id=referrer.user_id, referred_id=new_user_id, rewarded=True)
         db.add(referral)
         referrer.referral_count = (referrer.referral_count or 0) + 1
 
-        # Reward: 7 extra VIP days
         if referrer.is_vip and referrer.vip_expiry:
             try:
                 current = datetime.strptime(referrer.vip_expiry, "%Y-%m-%d").date()
@@ -956,34 +895,62 @@ def award_referral(db, referrer_code, new_user_id):
         db.commit()
 
         send_message(referrer.user_id, (
-            f"🎁 *Referral Reward!*\n\n"
+            f"🎁 Referral Reward!\n\n"
             f"Someone you referred just paid. "
-            f"You got *7 free VIP days* — now valid until {new_expiry}.\n\n"
+            f"You got 7 free VIP days — now valid until {new_expiry}.\n\n"
             f"Keep sharing your link: {BOT_LINK}?start=ref_{referrer.referral_code}"
-        ), parse_mode="Markdown")
+        ))
     except Exception as e:
         print(f"Referral error: {e}")
 
 
 # ──────────────────────────────────────────────
-# TELEGRAM API
+# TELEGRAM — FAIL-SAFE SENDER
 # ──────────────────────────────────────────────
 app = FastAPI()
 
 
 def send_message(chat_id, text, reply_markup=None, parse_mode=None):
+    """
+    Fail-safe Telegram sender.
+    Tries with parse_mode if given, falls back to plain text if Telegram rejects entities.
+    Never raises — always logs errors.
+    """
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         if len(text) > 4000:
             text = text[:4000] + "..."
+
         payload = {"chat_id": chat_id, "text": text}
         if reply_markup:
             payload["reply_markup"] = reply_markup
         if parse_mode:
             payload["parse_mode"] = parse_mode
-        requests.post(url, json=payload, timeout=15)
+
+        r = requests.post(url, json=payload, timeout=15)
+
+        if r.status_code == 200:
+            return r.json()
+
+        # Log the failure
+        print(f"[send_message] HTTP {r.status_code} chat={chat_id}: {r.text[:300]}")
+
+        # If parse_mode was used and Telegram rejected it, retry as plain text
+        if parse_mode:
+            payload.pop("parse_mode", None)
+            # Remove markdown markers so plain text still reads OK
+            clean = text.replace("*", "").replace("_", " ").replace("`", "")
+            payload["text"] = clean
+            r2 = requests.post(url, json=payload, timeout=15)
+            if r2.status_code == 200:
+                return r2.json()
+            print(f"[send_message] fallback also failed: {r2.status_code} {r2.text[:200]}")
+
+        return r.json() if r.content else None
+
     except Exception as e:
-        print(f"Send error {e}")
+        print(f"[send_message] Exception: {e}")
+        return None
 
 
 def set_bot_menu():
@@ -1004,16 +971,17 @@ def set_bot_menu():
         {"command": "start",            "description": "Start"},
     ]
     try:
-        requests.post(
+        r = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/setMyCommands",
             json={"commands": commands}, timeout=10,
         )
-    except Exception:
-        pass
+        print(f"[setMyCommands] {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        print(f"[setMyCommands] error: {e}")
 
 
 # ──────────────────────────────────────────────
-# REGION COMMANDS
+# REGION HANDLERS
 # ──────────────────────────────────────────────
 REGION_INFO = {
     "european": ("🇪🇺 EUROPEAN LEAGUES", "European"),
@@ -1046,7 +1014,6 @@ def handle_region(chat_id, user_id, region, user, db, limit):
         send_message(chat_id, f"No {pretty} fixtures in the next 7 days.\n{BOT_LINK}")
         return
 
-    # Personalize order
     scored = [(f, score_fixture_for_user(f, user)) for f in fixtures]
     scored.sort(key=lambda x: x[1], reverse=True)
     fixtures = [f for f, _ in scored]
@@ -1071,29 +1038,28 @@ def handle_region(chat_id, user_id, region, user, db, limit):
 def send_full_prediction(chat_id, fixture, db=None, user=None):
     p = predict_match(fixture)
     msg = (
-        f"⚽ *{fixture['home']} vs {fixture['away']}*\n"
+        f"⚽ {fixture['home']} vs {fixture['away']}\n"
         f"🏆 {fixture.get('league','')} | {fixture.get('date','')} {fixture.get('time','')} WAT\n\n"
         f"📊 {p['form']}\n"
         f"📈 {p['h2h']}\n"
         f"📉 {p['standings']}\n\n"
-        f"✅ *{p['verdict']}* ({p['confidence']}%)\n"
+        f"✅ {p['verdict']} ({p['confidence']}%)\n"
         f"📝 {p['explanation']}\n\n"
-        f"📋 *ALL MARKETS:*\n"
+        f"📋 ALL MARKETS:\n"
     )
     for m in p["all_markets"][:4]:
         msg += f"• {m['market']}: {m['pick']} @ {m['odds']} ({m['conf']}%)\n"
 
     if p.get("value_bets"):
-        msg += "\n💎 *VALUE BETS:*\n"
+        msg += "\n💎 VALUE BETS:\n"
         for v in p["value_bets"][:2]:
             msg += f"• {v['market']} @ {v['odds']} (edge +{v['edge']}%)\n"
 
     msg += (f"\n💰 N1000 → N{p['winnings_1000']}\n"
             f"📡 {p['live_odds_source']}\n{p['disclaimer']}")
 
-    send_message(chat_id, msg, parse_mode="Markdown")
+    send_message(chat_id, msg)
 
-    # Log prediction for tracking
     if db and user:
         try:
             pred = Prediction(
@@ -1110,6 +1076,84 @@ def send_full_prediction(chat_id, fixture, db=None, user=None):
             update_user_preferences(db, user, fixture, p["best_market"])
         except Exception as e:
             print(f"Pred log error: {e}")
+
+
+def handle_n1m(chat_id, user, db):
+    if not user.is_vip:
+        send_message(chat_id, (
+            f"🚀 N1M Challenge — VIP Only\n\n"
+            f"Turn ₦1,000 into ₦1,000,000 with a single accumulator.\n\n"
+            f"✅ Personalized to your favorite leagues\n"
+            f"✅ Built by Dixon-Coles model\n"
+            f"✅ Regenerate anytime\n\n"
+            f"👉 {RENDER_URL}/subscribe?uid={user.user_id}"
+        ))
+        return
+
+    send_message(chat_id, "🚀 Building your N1M slip...\nThis takes ~15 seconds.")
+
+    fixtures = fetch_real_fixtures(days_ahead=0, limit=40)
+    if len(fixtures) < 8:
+        for i in range(1, 8):
+            extra = fetch_real_fixtures(days_ahead=i, limit=40)
+            exist = {f"{x['home']}-{x['away']}" for x in fixtures}
+            for ef in extra:
+                if f"{ef['home']}-{ef['away']}" not in exist:
+                    fixtures.append(ef)
+            if len(fixtures) >= 20:
+                break
+
+    if len(fixtures) < 8:
+        send_message(chat_id, f"Not enough fixtures today ({len(fixtures)}). Try again later.")
+        return
+
+    slip = generate_n1m_slip(fixtures, user, stake=1000, target=1000000)
+
+    if not slip["picks"]:
+        send_message(chat_id, "Could not build a slip. Try again later.")
+        return
+
+    user.n1m_bankroll = slip["stake"]
+    if slip["potential_win"] > (user.n1m_best or 0):
+        user.n1m_best = slip["potential_win"]
+    db.commit()
+
+    target_status = "✅ TARGET MET" if slip["target_met"] else "⚠️ Slightly below target"
+
+    msg = (
+        f"🚀 N1M CHALLENGE — {datetime.now().strftime('%d %b %Y')}\n\n"
+        f"💰 Stake: N{slip['stake']:.0f}\n"
+        f"🎯 Potential win: N{slip['potential_win']:,.0f}\n"
+        f"📊 Total odds: {slip['total_odds']}\n"
+        f"{target_status}\n\n"
+        f"Your {len(slip['picks'])}-leg accumulator:\n\n"
+    )
+    for i, p in enumerate(slip["picks"], 1):
+        msg += (f"{i}. {p['match']}\n"
+                f"   {p['market']}: {p['pick']} @ {p['odds']} ({p['conf']}%)\n"
+                f"   🏆 {p['league']}\n\n")
+
+    msg += (f"⚠️ N1M slip is high-risk. Higher odds = higher chance of failure. "
+            f"Only stake what you can afford to lose.\n\n"
+            f"Regenerate with new picks: tap below.\n{BOT_LINK}")
+
+    kb = {"inline_keyboard": [[
+        {"text": "🔄 Regenerate Slip", "callback_data": "n1m_regen"},
+        {"text": "💎 Go VIP Monthly", "url": f"{RENDER_URL}/subscribe?uid={user.user_id}"},
+    ]]}
+    send_message(chat_id, msg, reply_markup=kb)
+
+    try:
+        for p in slip["picks"]:
+            pred = Prediction(
+                user_id=user.user_id, match=p["match"], league=p["league"],
+                market=p["market"], pick=p["pick"], odds=p["odds"],
+                confidence=p["conf"], match_date=str(date.today()),
+            )
+            db.add(pred)
+        db.commit()
+    except Exception as e:
+        print(f"N1M log error: {e}")
 
 
 # ──────────────────────────────────────────────
@@ -1155,7 +1199,7 @@ def process_update(upd):
                     if not fixtures:
                         send_message(chat_id, f"No fixtures for {region}.\n{BOT_LINK}")
                         return
-                    send_message(chat_id, f"🧠 *AI Analysis — {region.title()}*", parse_mode="Markdown")
+                    send_message(chat_id, f"🧠 AI Analysis — {region.title()}")
                     for f in fixtures[:5]:
                         if user2.daily_count >= limit:
                             break
@@ -1174,12 +1218,11 @@ def process_update(upd):
                     if not fixtures:
                         send_message(chat_id, f"No fixtures today.\n{BOT_LINK}")
                         return
-                    # Sort by user preference
                     scored = [(f, score_fixture_for_user(f, user2)) for f in fixtures]
                     scored.sort(key=lambda x: x[1], reverse=True)
                     fixtures = [f for f, _ in scored]
 
-                    send_message(chat_id, "🧠 *Personalized AI Analysis*", parse_mode="Markdown")
+                    send_message(chat_id, "🧠 Personalized AI Analysis")
                     for f in fixtures[:5]:
                         if user2.daily_count >= limit:
                             break
@@ -1191,10 +1234,9 @@ def process_update(upd):
                 elif data == "generate_betslip":
                     if not user2.is_vip:
                         send_message(chat_id,
-                                     f"💎 *VIP only.*\n\n"
+                                     f"💎 VIP only.\n\n"
                                      f"Get 10-match betslips + N1M challenge:\n"
-                                     f"{RENDER_URL}/subscribe?uid={from_id}",
-                                     parse_mode="Markdown")
+                                     f"{RENDER_URL}/subscribe?uid={from_id}")
                         return
                     fixtures = fetch_real_fixtures(days_ahead=0, limit=20)
                     if len(fixtures) < 5:
@@ -1210,15 +1252,15 @@ def process_update(upd):
                     if not slip:
                         send_message(chat_id, f"Not enough fixtures ({len(fixtures)}).")
                         return
-                    msg = (f"💰 *VIP BETSLIP — {datetime.now().strftime('%d %b %Y')}*\n"
+                    msg = (f"💰 VIP BETSLIP — {datetime.now().strftime('%d %b %Y')}\n"
                            f"10 matches · Dixon-Coles · Personalized\n\n")
                     for i, p in enumerate(slip["picks"], 1):
                         msg += (f"{i}. {p['match']}\n"
                                 f"   {p['market']}: {p['pick']} @ {p['odds']} ({p['conf']}%)\n\n")
-                    msg += (f"*TOTAL ODDS:* {slip['total_odds']}\n"
+                    msg += (f"TOTAL ODDS: {slip['total_odds']}\n"
                             f"N1000 → N{slip['winnings_1000']}\n"
                             f"N2000 → N{slip['winnings_2000']}\n{BOT_LINK}")
-                    send_message(chat_id, msg, parse_mode="Markdown")
+                    send_message(chat_id, msg)
 
                 elif data == "n1m_challenge":
                     handle_n1m(chat_id, user2, db2)
@@ -1248,7 +1290,6 @@ def process_update(upd):
             FREE, VIP = 2, 10
             cur = VIP if user.is_vip else FREE
 
-            # Handle referral code in /start ref_XXXX
             if low.startswith("/start") and "ref_" in low:
                 try:
                     ref_code = text.split("ref_")[1].split()[0].strip()
@@ -1262,14 +1303,14 @@ def process_update(upd):
             if low.startswith("/start"):
                 tier = "💎 VIP" if user.is_vip else "🆓 FREE"
                 send_message(chat_id, (
-                    f"👋 *Welcome to BetMaster Pro, {first_name or 'friend'}!*\n\n"
+                    f"👋 Welcome to BetMaster Pro, {first_name or 'friend'}!\n\n"
                     f"🧠 Dixon-Coles AI prediction engine\n"
                     f"🌍 Europe · Asia · Americas · National\n"
                     f"💎 Value-bet detection\n"
-                    f"🚀 *N1M Challenge* — ₦1,000 → ₦1,000,000\n\n"
-                    f"*Your tier:* {tier}\n"
-                    f"*Daily limit:* {user.daily_count}/{cur}\n\n"
-                    f"*Commands:*\n"
+                    f"🚀 N1M Challenge — ₦1,000 → ₦1,000,000\n\n"
+                    f"Your tier: {tier}\n"
+                    f"Daily limit: {user.daily_count}/{cur}\n\n"
+                    f"Commands:\n"
                     f"/today — Today's top picks\n"
                     f"/europeanleagues — Premier League, La Liga...\n"
                     f"/asianleagues — CSL, J1, Saudi Pro...\n"
@@ -1282,32 +1323,31 @@ def process_update(upd):
                     f"/refer — Invite friends, earn VIP\n"
                     f"/profile — Your profile\n"
                     f"/upgrade — Go VIP\n\n"
-                    f"Or send *Team A vs Team B* for instant analysis.\n\n{BOT_LINK}"
-                ), parse_mode="Markdown")
+                    f"Or send: Team A vs Team B for instant analysis.\n\n{BOT_LINK}"
+                ))
 
             # ── /help ──
             elif low.startswith("/help"):
                 send_message(chat_id, (
-                    f"📖 *BetMaster Pro Help*\n\n"
-                    f"*Fixtures:*\n"
+                    f"📖 BetMaster Pro Help\n\n"
+                    f"Fixtures:\n"
                     f"• /today — Top fixtures globally\n"
                     f"• /europeanleagues — European fixtures\n"
                     f"• /asianleagues — Asian fixtures\n"
                     f"• /americanleagues — American fixtures\n"
                     f"• /national — FIFA matches\n\n"
-                    f"*VIP Features:*\n"
+                    f"VIP Features:\n"
                     f"• /million — N1M accumulator challenge\n"
                     f"• /betslip — 10-match personalized accumulator\n\n"
-                    f"*Account:*\n"
+                    f"Account:\n"
                     f"• /stats — Your accuracy & streak\n"
                     f"• /leaderboard — Top 10 users\n"
                     f"• /refer — Get 7 free VIP days per paying referral\n"
                     f"• /profile — Full profile\n"
                     f"• /upgrade — See VIP plans\n\n"
                     f"FREE {FREE}/day · VIP {VIP}/day\n{BOT_LINK}"
-                ), parse_mode="Markdown")
+                ))
 
-            # ── Region commands ──
             elif low.startswith("/europeanleagues"):
                 handle_region(chat_id, user_id, "european", user, db, cur)
             elif low.startswith("/asianleagues"):
@@ -1317,11 +1357,9 @@ def process_update(upd):
             elif low.startswith("/national"):
                 handle_region(chat_id, user_id, "national", user, db, cur)
 
-            # ── /million — N1M Challenge ──
             elif low.startswith("/million") or low.startswith("/m1"):
                 handle_n1m(chat_id, user, db)
 
-            # ── /today ──
             elif low.startswith("/today"):
                 if user.daily_count >= cur:
                     send_message(chat_id,
@@ -1337,7 +1375,7 @@ def process_update(upd):
                 scored.sort(key=lambda x: x[1], reverse=True)
                 fixtures = [f for f, _ in scored]
 
-                msg_txt = f"⚽ *TOP FIXTURES — {fixtures[0].get('date', 'Today')}*\n\n"
+                msg_txt = f"⚽ TOP FIXTURES — {fixtures[0].get('date', 'Today')}\n\n"
                 for i, f in enumerate(fixtures, 1):
                     star = "⭐ " if score_fixture_for_user(f, user) >= 50 else ""
                     msg_txt += (f"{i}. {star}{f['home']} vs {f['away']}\n"
@@ -1349,9 +1387,8 @@ def process_update(upd):
                     [{"text": "🧠 Predict Top 5", "callback_data": "predict_top5"}],
                     [{"text": "🚀 N1M Challenge", "callback_data": "n1m_challenge"}],
                 ]}
-                send_message(chat_id, msg_txt, reply_markup=kb, parse_mode="Markdown")
+                send_message(chat_id, msg_txt, reply_markup=kb)
 
-            # ── /betslip ──
             elif low.startswith("/betslip"):
                 if not user.is_vip:
                     send_message(chat_id,
@@ -1362,32 +1399,30 @@ def process_update(upd):
                 if not slip:
                     send_message(chat_id, "Not enough fixtures for a 10-match slip.")
                     return
-                msg_txt = f"💰 *VIP BETSLIP — {datetime.now().strftime('%d %b %Y')}*\n\n"
+                msg_txt = f"💰 VIP BETSLIP — {datetime.now().strftime('%d %b %Y')}\n\n"
                 for i, p in enumerate(slip["picks"], 1):
                     msg_txt += f"{i}. {p['match']}\n   {p['market']}: {p['pick']} @ {p['odds']}\n\n"
-                msg_txt += (f"*TOTAL ODDS:* {slip['total_odds']}\n"
+                msg_txt += (f"TOTAL ODDS: {slip['total_odds']}\n"
                             f"N1000 → N{slip['winnings_1000']}\n"
                             f"N2000 → N{slip['winnings_2000']}\n{BOT_LINK}")
-                send_message(chat_id, msg_txt, parse_mode="Markdown")
+                send_message(chat_id, msg_txt)
 
-            # ── /stats ──
             elif low.startswith("/stats"):
                 stats = get_user_stats(db, user_id)
                 msg_txt = (
-                    f"📊 *Your BetMaster Stats*\n\n"
-                    f"🔥 *Current streak:* {stats['streak']}\n"
-                    f"🏆 *Best streak:* {stats['best_streak']}\n"
-                    f"🎯 *Total predictions:* {stats['total']}\n"
+                    f"📊 Your BetMaster Stats\n\n"
+                    f"🔥 Current streak: {stats['streak']}\n"
+                    f"🏆 Best streak: {stats['best_streak']}\n"
+                    f"🎯 Total predictions: {stats['total']}\n"
                     f"✅ Wins: {stats['wins']} | ❌ Losses: {stats['losses']}\n"
-                    f"📈 *Win rate:* {stats['win_rate']}%\n\n"
-                    f"🎁 *Referrals:* {stats['referrals']}\n"
-                    f"🚀 *N1M bankroll:* N{stats['n1m_bankroll']:.0f} "
+                    f"📈 Win rate: {stats['win_rate']}%\n\n"
+                    f"🎁 Referrals: {stats['referrals']}\n"
+                    f"🚀 N1M bankroll: N{stats['n1m_bankroll']:.0f} "
                     f"(best: N{stats['n1m_best']:.0f})\n\n"
                     f"{BOT_LINK}"
                 )
-                send_message(chat_id, msg_txt, parse_mode="Markdown")
+                send_message(chat_id, msg_txt)
 
-            # ── /leaderboard ──
             elif low.startswith("/leaderboard"):
                 try:
                     top = db.query(User).filter(User.total_predictions >= 5)\
@@ -1395,7 +1430,7 @@ def process_update(upd):
                 except Exception:
                     top = []
 
-                msg_txt = "🏆 *Leaderboard — Top Predictors*\n\n"
+                msg_txt = "🏆 Leaderboard — Top Predictors\n\n"
                 if not top:
                     msg_txt += "No stats yet. Be the first to top the chart!\n"
                 else:
@@ -1405,60 +1440,56 @@ def process_update(upd):
                         rate = round(u.total_wins / max(u.total_predictions, 1) * 100, 0)
                         msg_txt += f"{medal} {name} — {u.total_wins}W · {rate:.0f}%\n"
                 msg_txt += f"\n{BOT_LINK}"
-                send_message(chat_id, msg_txt, parse_mode="Markdown")
+                send_message(chat_id, msg_txt)
 
-            # ── /refer ──
             elif low.startswith("/refer"):
                 ref_link = f"https://t.me/Betmasterpro_bot?start=ref_{user.referral_code}"
                 msg_txt = (
-                    f"🎁 *Refer Friends, Earn VIP*\n\n"
-                    f"*Your referral link:*\n`{ref_link}`\n\n"
-                    f"*Rewards:*\n"
-                    f"✅ You get *7 free VIP days* when someone you refer pays\n"
-                    f"✅ They get *20% off* their first month\n\n"
-                    f"*Your referrals:* {user.referral_count or 0}\n\n"
+                    f"🎁 Refer Friends, Earn VIP\n\n"
+                    f"Your referral link:\n{ref_link}\n\n"
+                    f"Rewards:\n"
+                    f"✅ You get 7 free VIP days when someone you refer pays\n"
+                    f"✅ They get 20% off their first month\n\n"
+                    f"Your referrals: {user.referral_count or 0}\n\n"
                     f"Share it, stack up VIP days free! 💎\n{BOT_LINK}"
                 )
-                send_message(chat_id, msg_txt, parse_mode="Markdown")
+                send_message(chat_id, msg_txt)
 
-            # ── /profile ──
             elif low.startswith("/profile"):
                 stats = get_user_stats(db, user_id)
                 tier = "💎 VIP" if user.is_vip else "🆓 FREE"
                 exp = user.vip_expiry if user.is_vip else "—"
                 fav_l = user.fav_leagues or "None yet"
                 msg_txt = (
-                    f"👤 *Your Profile*\n\n"
-                    f"*Name:* {first_name or username or 'Anon'}\n"
-                    f"*Tier:* {tier}\n"
-                    f"*VIP until:* {exp}\n"
-                    f"*Daily used:* {user.daily_count}/{cur}\n\n"
-                    f"📊 *Stats:*\n"
+                    f"👤 Your Profile\n\n"
+                    f"Name: {first_name or username or 'Anon'}\n"
+                    f"Tier: {tier}\n"
+                    f"VIP until: {exp}\n"
+                    f"Daily used: {user.daily_count}/{cur}\n\n"
+                    f"📊 Stats:\n"
                     f"• Streak: {stats['streak']} (best {stats['best_streak']})\n"
                     f"• Win rate: {stats['win_rate']}% ({stats['wins']}/{stats['total']})\n"
                     f"• Referrals: {stats['referrals']}\n\n"
-                    f"⭐ *Favorite leagues:* {fav_l}\n\n"
+                    f"⭐ Favorite leagues: {fav_l}\n\n"
                     f"{BOT_LINK}"
                 )
-                send_message(chat_id, msg_txt, parse_mode="Markdown")
+                send_message(chat_id, msg_txt)
 
-            # ── /upgrade ──
             elif low.startswith("/upgrade"):
                 send_message(chat_id, (
-                    f"💎 *VIP Benefits*\n\n"
+                    f"💎 VIP Benefits\n\n"
                     f"✅ 10 predictions/day (vs FREE 2)\n"
-                    f"✅ 🚀 *N1M Challenge* — N1,000 → N1,000,000\n"
+                    f"✅ 🚀 N1M Challenge — N1,000 → N1,000,000\n"
                     f"✅ 10-match personalized betslips\n"
                     f"✅ Value-bet alerts\n"
                     f"✅ Personalized fixture ranking\n\n"
-                    f"*Plans:*\n"
+                    f"Plans:\n"
                     f"• Daily — N500 (24h)\n"
                     f"• Weekly — N2,000\n"
                     f"• Monthly — N5,000 (save N3,000)\n\n"
                     f"👉 {RENDER_URL}/subscribe?uid={user_id}"
-                ), parse_mode="Markdown")
+                ))
 
-            # ── Team vs Team manual query ──
             elif " vs " in low and 5 < len(text) < 100:
                 if user.daily_count >= cur:
                     send_message(chat_id,
@@ -1508,90 +1539,6 @@ def process_update(upd):
 
 
 # ──────────────────────────────────────────────
-# N1M HANDLER
-# ──────────────────────────────────────────────
-def handle_n1m(chat_id, user, db):
-    """Generate or view the N1M challenge slip."""
-    if not user.is_vip:
-        send_message(chat_id, (
-            f"🚀 *N1M Challenge — VIP Only*\n\n"
-            f"Turn ₦1,000 into ₦1,000,000 with a single accumulator.\n\n"
-            f"✅ Personalized to your favorite leagues\n"
-            f"✅ Built by Dixon-Coles model\n"
-            f"✅ Regenerate anytime\n\n"
-            f"👉 {RENDER_URL}/subscribe?uid={user.user_id}"
-        ), parse_mode="Markdown")
-        return
-
-    send_message(chat_id, "🚀 *Building your N1M slip...*\nThis takes ~15 seconds.", parse_mode="Markdown")
-
-    fixtures = fetch_real_fixtures(days_ahead=0, limit=40)
-    if len(fixtures) < 8:
-        for i in range(1, 8):
-            extra = fetch_real_fixtures(days_ahead=i, limit=40)
-            exist = {f"{x['home']}-{x['away']}" for x in fixtures}
-            for ef in extra:
-                if f"{ef['home']}-{ef['away']}" not in exist:
-                    fixtures.append(ef)
-            if len(fixtures) >= 20:
-                break
-
-    if len(fixtures) < 8:
-        send_message(chat_id, f"Not enough fixtures today ({len(fixtures)}). Try again later.")
-        return
-
-    slip = generate_n1m_slip(fixtures, user, stake=1000, target=1000000)
-
-    if not slip["picks"]:
-        send_message(chat_id, "Could not build a slip. Try again later.")
-        return
-
-    # Update bankroll if this is a fresh generation
-    user.n1m_bankroll = slip["stake"]
-    if slip["potential_win"] > (user.n1m_best or 0):
-        user.n1m_best = slip["potential_win"]
-    db.commit()
-
-    target_status = "✅ TARGET MET" if slip["target_met"] else "⚠️ Slightly below target"
-
-    msg = (
-        f"🚀 *N1M CHALLENGE — {datetime.now().strftime('%d %b %Y')}*\n\n"
-        f"💰 *Stake:* N{slip['stake']:.0f}\n"
-        f"🎯 *Potential win:* N{slip['potential_win']:,.0f}\n"
-        f"📊 *Total odds:* {slip['total_odds']}\n"
-        f"{target_status}\n\n"
-        f"*Your {len(slip['picks'])}-leg accumulator:*\n\n"
-    )
-    for i, p in enumerate(slip["picks"], 1):
-        msg += (f"{i}. *{p['match']}*\n"
-                f"   {p['market']}: {p['pick']} @ {p['odds']} ({p['conf']}%)\n"
-                f"   🏆 {p['league']}\n\n")
-
-    msg += (f"⚠️ *N1M slip is high-risk.* Higher odds = higher chance of failure. "
-            f"Only stake what you can afford to lose.\n\n"
-            f"Regenerate with new picks: tap below.\n{BOT_LINK}")
-
-    kb = {"inline_keyboard": [[
-        {"text": "🔄 Regenerate Slip", "callback_data": "n1m_regen"},
-        {"text": "💎 Go VIP Monthly", "url": f"{RENDER_URL}/subscribe?uid={user.user_id}"},
-    ]]}
-    send_message(chat_id, msg, reply_markup=kb, parse_mode="Markdown")
-
-    # Log each pick
-    try:
-        for p in slip["picks"]:
-            pred = Prediction(
-                user_id=user.user_id, match=p["match"], league=p["league"],
-                market=p["market"], pick=p["pick"], odds=p["odds"],
-                confidence=p["conf"], match_date=str(date.today()),
-            )
-            db.add(pred)
-        db.commit()
-    except Exception as e:
-        print(f"N1M log error: {e}")
-
-
-# ──────────────────────────────────────────────
 # SCHEDULER
 # ──────────────────────────────────────────────
 def channel_scheduler():
@@ -1602,52 +1549,49 @@ def channel_scheduler():
             hm = now_wat.strftime("%H:%M")
             today_str = now_wat.strftime("%Y-%m-%d")
 
-            # 06:00 — morning picks
             if hm == "06:00" and f"{today_str}-6am" not in posted_today:
                 try:
                     fixtures = fetch_real_fixtures(days_ahead=0, limit=5)
                     if fixtures and CHANNEL_ID:
-                        msg = f"☀️ *Good Morning {today_str} — 6AM Picks*\n\n"
+                        msg = f"☀️ Good Morning {today_str} — 6AM Picks\n\n"
                         for f in fixtures[:3]:
                             p = predict_match(f)
-                            msg += (f"*{f['home']} vs {f['away']}*\n"
+                            msg += (f"{f['home']} vs {f['away']}\n"
                                     f"{f.get('league','')} · {p['best_market']}: "
-                                    f"*{p['best_pick']}* @ {p['odds']} ({p['confidence']}%)\n\n")
+                                    f"{p['best_pick']} @ {p['odds']} ({p['confidence']}%)\n\n")
                         msg += f"Full analysis: {BOT_HANDLE}\n{BOT_LINK}"
-                        send_message(CHANNEL_ID, msg, parse_mode="Markdown")
+                        send_message(CHANNEL_ID, msg)
                 except Exception as e:
                     print(f"6AM error: {e}")
                 posted_today.add(f"{today_str}-6am")
 
-            # 08:00 — top 5
             if hm == "08:00" and f"{today_str}-8am" not in posted_today:
                 try:
                     fixtures = fetch_real_fixtures(days_ahead=0, limit=10)
                     if fixtures and CHANNEL_ID:
-                        msg = f"🎯 *TOP MATCHES — {today_str}*\n\n"
+                        msg = f"🎯 TOP MATCHES — {today_str}\n\n"
                         for f in fixtures[:5]:
                             p = predict_match(f)
-                            msg += (f"*{f['home']} vs {f['away']}*\n"
+                            msg += (f"{f['home']} vs {f['away']}\n"
                                     f"{f.get('league','')} · {p['best_pick']} @ {p['odds']} "
                                     f"({p['confidence']}%)\n\n")
                         msg += f"Want full analysis? {BOT_HANDLE}\n{BOT_LINK}"
-                        send_message(CHANNEL_ID, msg, parse_mode="Markdown")
+                        send_message(CHANNEL_ID, msg)
                 except Exception as e:
                     print(f"8AM error: {e}")
                 posted_today.add(f"{today_str}-8am")
 
-            # 21:00 — tomorrow preview
             if hm == "21:00" and f"{today_str}-9pm" not in posted_today:
                 try:
                     fixtures = fetch_real_fixtures(days_ahead=1, limit=5)
                     if fixtures and CHANNEL_ID:
-                        msg = f"🌙 *TOMORROW'S TOP PICKS*\n\n"
+                        msg = f"🌙 TOMORROW'S TOP PICKS\n\n"
                         for f in fixtures[:3]:
                             p = predict_match(f)
-                            msg += (f"*{f['home']} vs {f['away']}*\n"
+                            msg += (f"{f['home']} vs {f['away']}\n"
                                     f"{f.get('league','')} · {p['best_pick']} @ {p['odds']}\n\n")
                         msg += f"More on {BOT_HANDLE}\n{BOT_LINK}"
-                        send_message(CHANNEL_ID, msg, parse_mode="Markdown")
+                        send_message(CHANNEL_ID, msg)
                 except Exception as e:
                     print(f"9PM error: {e}")
                 posted_today.add(f"{today_str}-9pm")
@@ -1714,6 +1658,27 @@ async def set_webhook():
     return r
 
 
+@app.get("/debug-fixtures")
+async def debug_fixtures(date: str = "", region: str = ""):
+    try:
+        target = (datetime.strptime(date, "%Y-%m-%d").date()
+                  if date else (datetime.utcnow() + timedelta(hours=1)).date())
+        if region:
+            fixtures = fetch_by_region(target, region, limit=10)
+        else:
+            fixtures = fetch_today_fixtures(target, limit=10)
+        return {
+            "requested_date": target.strftime("%Y-%m-%d"),
+            "region": region or "all",
+            "found": len(fixtures),
+            "fixtures": fixtures[:5],
+            "brain_size": len(HISTORICAL_STATS),
+            "h2h_pairs": len(H2H_CACHE),
+        }
+    except Exception as e:
+        return {"error": str(e), "trace": traceback.format_exc()}
+
+
 # ═══ PAYMENT ROUTES ═══
 @app.get("/subscribe", response_class=HTMLResponse)
 async def subscribe(request: Request):
@@ -1766,7 +1731,6 @@ async def verify(tx_ref: str, uid: str, plan: str):
             data = r["data"][0] if isinstance(r["data"], list) else r["data"]
             if data.get("status") in ("successful", "completed"):
                 activate_vip(uid, plan)
-                # Award referral
                 try:
                     db = SessionLocal()
                     u = get_user(db, int(uid))
@@ -1833,34 +1797,32 @@ async def flutterwave_webhook(request: Request):
 
 
 # ──────────────────────────────────────────────
-# PAYMENT PAGE TEMPLATES
+# PAYMENT TEMPLATES
 # ──────────────────────────────────────────────
 PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#0a0e1a">
 <title>BetMaster Pro — VIP Subscription</title>
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  :root {
-    --bg:#0a0e1a; --card:rgba(255,255,255,0.03); --card-hover:rgba(255,255,255,0.05);
-    --border:rgba(255,255,255,0.08); --border-hover:rgba(255,255,255,0.16);
-    --text:#e8ecf5; --text-dim:#8b94ab; --text-dimmer:#5a6378;
-    --green:#22c55e; --green-glow:rgba(34,197,94,0.35);
-    --blue:#3b82f6; --blue-glow:rgba(59,130,246,0.35);
-    --gold:#f5b945; --radius:16px; --radius-sm:10px;
-  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+  :root{--bg:#0a0e1a;--card:rgba(255,255,255,.03);--card-hover:rgba(255,255,255,.05);
+    --border:rgba(255,255,255,.08);--border-hover:rgba(255,255,255,.16);
+    --text:#e8ecf5;--text-dim:#8b94ab;--text-dimmer:#5a6378;
+    --green:#22c55e;--green-glow:rgba(34,197,94,.35);
+    --blue:#3b82f6;--blue-glow:rgba(59,130,246,.35);
+    --gold:#f5b945;--radius:16px;--radius-sm:10px;}
   html,body{height:100%;}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Arial,sans-serif;
     background:var(--bg);color:var(--text);line-height:1.5;-webkit-font-smoothing:antialiased;
     overflow-x:hidden;position:relative;min-height:100vh;}
   body::before{content:"";position:fixed;top:-20%;left:50%;transform:translateX(-50%);
-    width:900px;height:900px;background:radial-gradient(circle,rgba(34,197,94,0.10) 0%,transparent 60%);
+    width:900px;height:900px;background:radial-gradient(circle,rgba(34,197,94,.10) 0%,transparent 60%);
     pointer-events:none;z-index:0;}
   body::after{content:"";position:fixed;bottom:-30%;right:-10%;width:700px;height:700px;
-    background:radial-gradient(circle,rgba(59,130,246,0.08) 0%,transparent 60%);pointer-events:none;z-index:0;}
+    background:radial-gradient(circle,rgba(59,130,246,.08) 0%,transparent 60%);pointer-events:none;z-index:0;}
   .container{max-width:960px;margin:0 auto;padding:0 20px;position:relative;z-index:1;}
   nav{display:flex;align-items:center;justify-content:space-between;padding:20px 0;}
   .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:16px;}
@@ -1873,7 +1835,7 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
   .nav-cta:hover{border-color:var(--border-hover);color:var(--text);}
   .hero{text-align:center;padding:40px 0 32px;}
   .badge{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:999px;
-    background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.20);color:#4ade80;
+    background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.20);color:#4ade80;
     font-size:12px;font-weight:600;margin-bottom:20px;}
   .badge-dot{width:6px;height:6px;border-radius:50%;background:#22c55e;box-shadow:0 0 8px #22c55e;
     animation:pulse 2s infinite;}
@@ -1890,13 +1852,13 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
   .plan{position:relative;background:var(--card);border:1px solid var(--border);
     border-radius:var(--radius);padding:26px 22px;transition:all .25s ease;overflow:hidden;}
   .plan:hover{background:var(--card-hover);border-color:var(--border-hover);transform:translateY(-2px);}
-  .plan.featured{border-color:rgba(59,130,246,0.4);
-    background:linear-gradient(180deg,rgba(59,130,246,0.06),rgba(59,130,246,0.02));
+  .plan.featured{border-color:rgba(59,130,246,.4);
+    background:linear-gradient(180deg,rgba(59,130,246,.06),rgba(59,130,246,.02));
     box-shadow:0 20px 60px -20px var(--blue-glow);}
   .ribbon{position:absolute;top:14px;right:14px;padding:4px 10px;
     background:linear-gradient(135deg,#3b82f6,#2563eb);color:white;font-size:10.5px;
     font-weight:700;border-radius:6px;letter-spacing:.05em;text-transform:uppercase;
-    box-shadow:0 4px 12px rgba(59,130,246,0.4);}
+    box-shadow:0 4px 12px rgba(59,130,246,.4);}
   .plan-name{font-size:13px;font-weight:600;color:var(--text-dim);letter-spacing:.08em;
     text-transform:uppercase;margin-bottom:12px;}
   .plan-price{display:flex;align-items:baseline;gap:6px;margin-bottom:6px;}
@@ -1917,11 +1879,8 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
   .btn-blue{background:linear-gradient(135deg,#3b82f6,#2563eb);color:white;
     box-shadow:0 8px 24px -8px var(--blue-glow);}
   .btn-blue:hover{transform:translateY(-1px);}
-  .btn-gold{background:linear-gradient(135deg,#f5b945,#d97706);color:#0a0e1a;
-    box-shadow:0 8px 24px -8px rgba(245,185,69,0.5);}
-  .btn-gold:hover{transform:translateY(-1px);}
   .btn:disabled{opacity:.7;cursor:not-allowed;}
-  .btn .spinner{width:16px;height:16px;border:2px solid rgba(255,255,255,0.3);
+  .btn .spinner{width:16px;height:16px;border:2px solid rgba(255,255,255,.3);
     border-top-color:white;border-radius:50%;animation:spin .7s linear infinite;display:none;}
   .btn.loading .spinner{display:block;}
   .btn.loading .btn-label{display:none;}
@@ -1932,8 +1891,7 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
   .features-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;}
   .feature-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
     padding:22px 20px;transition:all .2s;}
-  .feature-card:hover{background:var(--card-hover);border-color:var(--border-hover);}
-  .feature-icon{width:40px;height:40px;border-radius:10px;background:rgba(34,197,94,0.10);
+  .feature-icon{width:40px;height:40px;border-radius:10px;background:rgba(34,197,94,.10);
     display:flex;align-items:center;justify-content:center;margin-bottom:14px;}
   .feature-icon svg{width:20px;height:20px;color:var(--green);}
   .feature-card h3{font-size:15px;font-weight:600;margin-bottom:6px;}
@@ -1960,19 +1918,14 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
   footer{border-top:1px solid var(--border);padding:28px 0 40px;margin-top:40px;text-align:center;
     font-size:12.5px;color:var(--text-dimmer);}
   footer a{color:var(--text-dim);text-decoration:none;}
-  footer a:hover{color:var(--text);}
   .footer-links{display:flex;justify-content:center;flex-wrap:wrap;gap:20px;margin-bottom:14px;}
   .disclaimer{max-width:500px;margin:14px auto 0;font-size:11.5px;line-height:1.55;color:var(--text-dimmer);}
   @media (max-width:720px){
-    h1{font-size:30px;} .hero{padding:24px 0 20px;}
+    h1{font-size:30px;}.hero{padding:24px 0 20px;}
     .plans{grid-template-columns:1fr;gap:16px;margin:28px 0 40px;}
     .features-grid,.testimonials{grid-template-columns:1fr;}
-    .plan-price .amount{font-size:30px;} section{padding:28px 0;}
+    .plan-price .amount{font-size:30px;}section{padding:28px 0;}
     .section-title{font-size:20px;}
-  }
-  @media (max-width:420px){
-    .container{padding:0 16px;} h1{font-size:26px;} .brand{font-size:15px;}
-    .trust-pill{font-size:11.5px;padding:7px 11px;}
   }
 </style>
 </head>
@@ -1996,7 +1949,7 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
       🚀 N1,000 → N1,000,000 Challenge
     </div>
     <h1>Unlock AI-Powered<br>Football Predictions</h1>
-    <p>Dixon-Coles model · Value-bet detection · Global coverage · N1M accumulator generator · Personalized picks</p>
+    <p>Dixon-Coles model · Value-bet detection · Global coverage · N1M accumulator · Personalized picks</p>
     <div class="trust-row">
       <div class="trust-pill">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
@@ -2017,10 +1970,7 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
     <div class="plans">
       <div class="plan">
         <div class="plan-name">Daily</div>
-        <div class="plan-price">
-          <span class="amount">₦500</span>
-          <span class="period">/ 24h</span>
-        </div>
+        <div class="plan-price"><span class="amount">₦500</span><span class="period">/ 24h</span></div>
         <div class="plan-sub">Quick taste of VIP</div>
         <ul class="plan-features">
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>10 predictions</li>
@@ -2028,18 +1978,14 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>10-match betslip</li>
         </ul>
         <a href="/pay?plan=daily&uid={{UID}}" class="btn btn-primary" onclick="return startPay(this)">
-          <span class="spinner"></span>
-          <span class="btn-label">Get 24h Access</span>
+          <span class="spinner"></span><span class="btn-label">Get 24h Access</span>
         </a>
       </div>
 
       <div class="plan featured">
         <div class="ribbon">Best Value</div>
         <div class="plan-name">Monthly</div>
-        <div class="plan-price">
-          <span class="amount">₦5,000</span>
-          <span class="period">/ month</span>
-        </div>
+        <div class="plan-price"><span class="amount">₦5,000</span><span class="period">/ month</span></div>
         <div class="plan-sub">Save <strong>₦3,000</strong> vs weekly</div>
         <ul class="plan-features">
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Everything in Weekly</li>
@@ -2047,17 +1993,13 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Early access to features</li>
         </ul>
         <a href="/pay?plan=monthly&uid={{UID}}" class="btn btn-blue" onclick="return startPay(this)">
-          <span class="spinner"></span>
-          <span class="btn-label">Get Monthly Access</span>
+          <span class="spinner"></span><span class="btn-label">Get Monthly Access</span>
         </a>
       </div>
 
       <div class="plan">
         <div class="plan-name">Weekly</div>
-        <div class="plan-price">
-          <span class="amount">₦2,000</span>
-          <span class="period">/ week</span>
-        </div>
+        <div class="plan-price"><span class="amount">₦2,000</span><span class="period">/ week</span></div>
         <div class="plan-sub">Trying us out</div>
         <ul class="plan-features">
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>10 predictions/day</li>
@@ -2065,8 +2007,7 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Personalized picks</li>
         </ul>
         <a href="/pay?plan=weekly&uid={{UID}}" class="btn btn-primary" onclick="return startPay(this)">
-          <span class="spinner"></span>
-          <span class="btn-label">Get Weekly Access</span>
+          <span class="spinner"></span><span class="btn-label">Get Weekly Access</span>
         </a>
       </div>
     </div>
@@ -2077,23 +2018,17 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
     <div class="section-sub">Built with the same models used by professional sportsbooks.</div>
     <div class="features-grid">
       <div class="feature-card">
-        <div class="feature-icon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>
-        </div>
+        <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg></div>
         <h3>Dixon-Coles Model</h3>
         <p>The industry-standard bivariate Poisson model used by pro bookmakers.</p>
       </div>
       <div class="feature-card">
-        <div class="feature-icon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-        </div>
+        <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div>
         <h3>N1M Challenge</h3>
         <p>Turn ₦1,000 into ₦1,000,000 with our high-odds accumulator builder.</p>
       </div>
       <div class="feature-card">
-        <div class="feature-icon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-        </div>
+        <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div>
         <h3>Personalized</h3>
         <p>Learns your favorite leagues and markets. Ranks fixtures for you.</p>
       </div>
