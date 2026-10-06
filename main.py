@@ -77,6 +77,7 @@ BTN_ASIA = "🇯🇵 Asian Leagues"
 BTN_AMERICA = "🇺🇸 American Leagues"
 BTN_BETSLIP = "💎 VIP Betslip"
 
+
 def get_main_keyboard(is_admin_user: bool = False):
     """Persistent reply keyboard shown under the message bar."""
     keyboard = [
@@ -248,7 +249,7 @@ def activate_vip(uid, plan, silent=False):
                 f"✅ N1M challenge access\n"
                 f"✅ 10-match betslip generator\n"
                 f"✅ Value-bet alerts\n\n"
-                f"Open the bot: {BOT_LINK"
+                f"Open the bot: {BOT_LINK}"
             ), reply_markup=get_main_keyboard(is_admin(int(uid))))
         return True
     except Exception as e:
@@ -1322,7 +1323,6 @@ def handle_admin_test_channel(chat_id):
 def map_button_to_command(text, admin):
     """Map reply-keyboard button text to internal action."""
     t = text.strip()
-    # Normalize by removing emojis
     low = t.lower()
     if "today" in low and "fixture" in low:
         return "/today"
@@ -1334,7 +1334,7 @@ def map_button_to_command(text, admin):
         return "/asianleagues"
     if "american" in low:
         return "/americanleagues"
-    if "betslip" in low or "vip" in low and "match" in low:
+    if "betslip" in low:
         return "/betslip"
     if admin and "admin" in low and "panel" in low:
         return "/admin"
@@ -1480,11 +1480,10 @@ def process_update(upd):
         admin = is_admin(user_id)
         main_kb = get_main_keyboard(admin)
 
-        # ── Map reply-keyboard button to command ──
         mapped = map_button_to_command(text, admin)
         if mapped:
             low = mapped.lower()
-            text = mapped  # treat as command
+            text = mapped
 
         db = SessionLocal()
         try:
@@ -1554,7 +1553,6 @@ def process_update(upd):
                 send_message(chat_id, "⛔ Admin access required.", reply_markup=main_kb)
                 return
 
-            # ── Referral tracking ──
             if low.startswith("/start") and "ref_" in low:
                 try:
                     ref_code = text.split("ref_")[1].split()[0].strip()
@@ -1564,7 +1562,6 @@ def process_update(upd):
                 except Exception:
                     pass
 
-            # ── /start ──
             if low.startswith("/start"):
                 tier = "🔐 ADMIN" if admin else ("💎 VIP" if user.is_vip else "🆓 FREE")
                 admin_line = "\n🔐 You have ADMIN access. Tap 🔐 Admin Panel.\n" if admin else ""
@@ -1585,7 +1582,6 @@ def process_update(upd):
                     f"Or send: Team A vs Team B for instant analysis.\n\n{BOT_LINK}"
                 ), reply_markup=main_kb)
 
-            # ── /help ──
             elif low.startswith("/help"):
                 admin_line = ("\n🔐 Admin Commands:\n"
                               "• /admin — panel\n"
@@ -2346,41 +2342,4 @@ FAILED_TEMPLATE = r"""<!DOCTYPE html>
 </head>
 <body>
 <div class="card">
-  <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>
-  <h1>Payment Not Confirmed</h1>
-  <p>We couldn't verify your transaction. If you were charged, contact support with the reference below.</p>
-  <div class="reason">{{REASON}}</div>
-  <div class="actions">
-    <a href="/subscribe?uid={{UID}}" class="btn btn-primary">Try Again</a>
-    <a href="{{BOT_LINK}}" class="btn btn-secondary">Contact Support</a>
-  </div>
-</div>
-</body>
-</html>"""
-
-
-def render_payment_page(uid):
-    from datetime import datetime as _dt
-    return (PAYMENT_TEMPLATE
-            .replace("{{UID}}", str(uid))
-            .replace("{{BOT_LINK}}", BOT_LINK)
-            .replace("{{YEAR}}", str(_dt.now().year)))
-
-
-def render_success_page(plan):
-    return SUCCESS_TEMPLATE.replace("{{PLAN}}", plan.upper()).replace("{{BOT_LINK}}", BOT_LINK)
-
-
-def render_failed_page(reason, uid=""):
-    return (FAILED_TEMPLATE
-            .replace("{{REASON}}", html.escape(str(reason))[:500])
-            .replace("{{UID}}", str(uid))
-            .replace("{{BOT_LINK}}", BOT_LINK))
-
-
-# ──────────────────────────────────────────────
-# RUN
-# ──────────────────────────────────────────────
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+  <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="
