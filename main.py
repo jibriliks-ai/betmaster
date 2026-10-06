@@ -1,8 +1,8 @@
 """
 main.py — BetMaster Pro
-Global soccer prediction bot with Dixon-Coles modeling, value-bet detection,
-multi-region coverage, N1M challenge, engagement systems, admin panel,
-and persistent reply keyboard menu.
+Global soccer prediction bot with Dixon-Coles modeling, versatile market analysis
+(all 1X2, DC, BTTS, O/U markets), value-bet detection, multi-region coverage,
+N1M challenge, engagement systems, admin panel, and persistent reply keyboard.
 
 Data sources: ESPN, TheSportsDB, OpenFootball, The Odds API.
 """
@@ -488,7 +488,10 @@ def predict_match(data):
     league_code = data.get("country", "E0")
     if league_code not in LEAGUE_AVG_GOALS:
         league_code = "E0"
+
     dc = dixon_coles_predict(home, away, league_code=league_code)
+
+    # ── H2H blend ──
     h2h_key = f"{home}_vs_{away}"
     h2h_rev = f"{away}_vs_{home}"
     h2h_games = H2H_CACHE.get(h2h_key, []) + H2H_CACHE.get(h2h_rev, [])
@@ -501,128 +504,171 @@ def predict_match(data):
     h2h_draws = len([g for g in h2h_games if g["result"] == "D"])
     h2h_btts = len([g for g in h2h_games if g["btts"] == 1])
     h2h_avg_goals = (sum(g["total"] for g in h2h_games) / len(h2h_games)) if h2h_games else 0
+
     dc_h, dc_d, dc_a = dc["home_win"], dc["draw"], dc["away_win"]
     if h2h_games and len(h2h_games) >= 3:
         w = 0.20
         dc_h = dc_h * (1 - w) + (h2h_home_wins / len(h2h_games) * 100) * w
         dc_d = dc_d * (1 - w) + (h2h_draws / len(h2h_games) * 100) * w
         dc_a = dc_a * (1 - w) + (h2h_away_wins / len(h2h_games) * 100) * w
+
     tot = dc_h + dc_d + dc_a
     if tot > 0:
         dc_h, dc_d, dc_a = dc_h / tot * 100, dc_d / tot * 100, dc_a / tot * 100
-    mp = {"home_win": round(dc_h, 1), "draw": round(dc_d, 1), "away_win": round(dc_a, 1)}
-    odds = {
-        "home": float(data.get("odds_h", 0) or 0),
-        "draw": float(data.get("odds_d", 0) or 0),
-        "away": float(data.get("odds_a", 0) or 0),
+
+    # ── Full probability table ──
+    p1 = round(dc_h, 1)
+    pX = round(dc_d, 1)
+    p2 = round(dc_a, 1)
+
+    p1X = round(p1 + pX, 1)
+    pX2 = round(pX + p2, 1)
+    p12 = round(p1 + p2, 1)
+
+    pBTTS_yes = round(dc["btts"], 1)
+    pBTTS_no = round(100 - pBTTS_yes, 1)
+
+    pO15 = round(dc["over15"], 1)
+    pO25 = round(dc["over25"], 1)
+    pO35 = round(dc["over35"], 1)
+    pU15 = round(100 - pO15, 1)
+    pU25 = round(100 - pO25, 1)
+    pU35 = round(100 - pO35, 1)
+
+    market_table = {
+        "1": p1, "X": pX, "2": p2,
+        "1X": p1X, "X2": pX2, "12": p12,
+        "BTTS Yes": pBTTS_yes, "BTTS No": pBTTS_no,
+        "Over 1.5": pO15, "Over 2.5": pO25, "Over 3.5": pO35,
+        "Under 1.5": pU15, "Under 2.5": pU25, "Under 3.5": pU35,
     }
-    if odds["home"] <= 1.01: odds["home"] = round(100 / max(mp["home_win"], 5), 2)
-    if odds["draw"] <= 1.01: odds["draw"] = round(100 / max(mp["draw"], 5), 2)
-    if odds["away"] <= 1.01: odds["away"] = round(100 / max(mp["away_win"], 5), 2)
-    markets = []
-    best_1x2 = max(
-        [("Home Win", mp["home_win"], odds["home"]),
-         ("Draw", mp["draw"], odds["draw"]),
-         ("Away Win", mp["away_win"], odds["away"])],
-        key=lambda x: x[1],
-    )
-    if best_1x2[1] >= 40:
-        markets.append({
-            "market": "1X2", "pick": best_1x2[0], "odds": best_1x2[2],
-            "conf": round(best_1x2[1], 1),
-            "reason": f"Dixon-Coles: {best_1x2[0]} {best_1x2[1]:.1f}%. "
-                      f"xG {home} {dc['home_xg']} vs {away} {dc['away_xg']}.",
+
+    # ── Odds (fallback to model-implied) ──
+    odds_h = float(data.get("odds_h", 0) or 0) or round(100 / max(p1, 5), 2)
+    odds_d = float(data.get("odds_d", 0) or 0) or round(100 / max(pX, 5), 2)
+    odds_a = float(data.get("odds_a", 0) or 0) or round(100 / max(p2, 5), 2)
+    odds_btts_y = float(data.get("odds_btts", 0) or 0) or round(100 / max(pBTTS_yes, 5), 2)
+    odds_btts_n = round(100 / max(pBTTS_no, 5), 2)
+    odds_o25 = float(data.get("odds_over25", 0) or 0) or round(100 / max(pO25, 5), 2)
+    odds_u25 = round(100 / max(pU25, 5), 2)
+
+    odds_1X = round(100 / max(p1X, 5), 2)
+    odds_X2 = round(100 / max(pX2, 5), 2)
+    odds_12 = round(100 / max(p12, 5), 2)
+    odds_o15 = round(100 / max(pO15, 5), 2)
+    odds_o35 = round(100 / max(pO35, 5), 2)
+    odds_u15 = round(100 / max(pU15, 5), 2)
+    odds_u35 = round(100 / max(pU35, 5), 2)
+
+    # ── Build candidates for every market ──
+    candidates = []
+
+    def add(market, pick, prob, odds_val, reason):
+        if prob < 8 or prob > 95:
+            return
+        if not odds_val or odds_val <= 1.01:
+            return
+        implied = 100.0 / odds_val
+        edge = round(prob - implied, 2)
+        candidates.append({
+            "market": market,
+            "pick": pick,
+            "prob": round(prob, 1),
+            "conf": round(prob, 1),
+            "odds": round(odds_val, 2),
+            "edge": edge,
+            "reason": reason,
         })
-    dc_1x = mp["home_win"] + mp["draw"]
-    dc_x2 = mp["draw"] + mp["away_win"]
-    if dc_1x >= 70:
-        markets.append({
-            "market": "DC", "pick": f"{home} Win or Draw (1X)",
-            "odds": round(1.01 + (100 - dc_1x) / 100, 2),
-            "conf": round(dc_1x, 1),
-            "reason": f"Model: {dc_1x:.1f}% chance {home} does not lose.",
-        })
-    if dc_x2 >= 70:
-        markets.append({
-            "market": "DC", "pick": f"{away} Win or Draw (X2)",
-            "odds": round(1.01 + (100 - dc_x2) / 100, 2),
-            "conf": round(dc_x2, 1),
-            "reason": f"Model: {dc_x2:.1f}% chance {away} does not lose.",
-        })
-    if dc["btts"] >= 60:
-        markets.append({
-            "market": "BTTS", "pick": "BTTS Yes",
-            "odds": float(data.get("odds_btts", 1.85) or 1.85),
-            "conf": round(dc["btts"], 1),
-            "reason": f"BTTS probability {dc['btts']}%.",
-        })
-    elif dc["btts"] <= 40:
-        markets.append({
-            "market": "BTTS", "pick": "BTTS No", "odds": 1.85,
-            "conf": round(100 - dc["btts"], 1),
-            "reason": f"BTTS probability only {dc['btts']}%.",
-        })
-    if dc["over25"] >= 60:
-        markets.append({
-            "market": "O/U", "pick": "Over 2.5 Goals",
-            "odds": float(data.get("odds_over25", 1.90) or 1.90),
-            "conf": round(dc["over25"], 1),
-            "reason": f"Over 2.5 probability {dc['over25']}%. "
-                      f"Total xG {dc['home_xg'] + dc['away_xg']:.2f}.",
-        })
-    elif dc["over25"] <= 40:
-        markets.append({
-            "market": "O/U", "pick": "Under 2.5 Goals", "odds": 1.90,
-            "conf": round(100 - dc["over25"], 1),
-            "reason": f"Under 2.5 probability {100 - dc['over25']:.1f}%.",
-        })
-    if dc["over15"] >= 75:
-        markets.append({
-            "market": "O/U", "pick": "Over 1.5 Goals", "odds": 1.30,
-            "conf": round(dc["over15"], 1),
-            "reason": f"Over 1.5 probability {dc['over15']}% — banker.",
-        })
-    if not markets:
-        top = max(
-            [("Home Win", mp["home_win"], odds["home"]),
-             ("Draw", mp["draw"], odds["draw"]),
-             ("Away Win", mp["away_win"], odds["away"])],
-            key=lambda x: x[1],
-        )
-        markets.append({
-            "market": "1X2", "pick": top[0], "odds": top[2],
-            "conf": round(top[1], 1),
-            "reason": f"Best available — {top[0]} at {top[1]:.1f}%.",
-        })
-    markets.sort(key=lambda x: x["conf"], reverse=True)
-    best = markets[0]
-    vb = find_value_bets(mp, odds)
+
+    # 1X2
+    add("1X2", f"{home} Win (1)", p1, odds_h,
+        f"{home} win probability {p1}%. xG {home} {dc['home_xg']} vs {away} {dc['away_xg']}.")
+    add("1X2", "Draw (X)", pX, odds_d,
+        f"Draw probability {pX}%. H2H: {h2h_draws} draws last {len(h2h_games)}.")
+    add("1X2", f"{away} Win (2)", p2, odds_a,
+        f"{away} win probability {p2}%.")
+
+    # Double Chance
+    add("DC", f"{home} or Draw (1X)", p1X, odds_1X,
+        f"1X covers home win + draw. Model {p1X}%. Safest 1X2 combo.")
+    add("DC", f"Draw or {away} (X2)", pX2, odds_X2,
+        f"X2 covers draw + away win. Model {pX2}%.")
+    add("DC", f"{home} or {away} (12)", p12, odds_12,
+        f"No-draw probability {p12}%.")
+
+    # BTTS
+    add("BTTS", "BTTS Yes", pBTTS_yes, odds_btts_y,
+        f"Both teams score {pBTTS_yes}%. Combined xG {dc['home_xg'] + dc['away_xg']:.2f}.")
+    add("BTTS", "BTTS No", pBTTS_no, odds_btts_n,
+        f"Clean sheet or one team blanks. Probability {pBTTS_no}%.")
+
+    # Goals Over/Under
+    add("O/U", "Over 1.5 Goals", pO15, odds_o15,
+        f"Over 1.5 {pO15}%. Banker when total xG >= 2.5.")
+    add("O/U", "Over 2.5 Goals", pO25, odds_o25,
+        f"Over 2.5 {pO25}%. Total xG {dc['home_xg'] + dc['away_xg']:.2f}.")
+    add("O/U", "Over 3.5 Goals", pO35, odds_o35,
+        f"Over 3.5 {pO35}%. High-scoring signal.")
+    add("O/U", "Under 1.5 Goals", pU15, odds_u15,
+        f"Under 1.5 {pU15}%. Defensive battle expected.")
+    add("O/U", "Under 2.5 Goals", pU25, odds_u25,
+        f"Under 2.5 {pU25}%. Low-scoring match expected.")
+    add("O/U", "Under 3.5 Goals", pU35, odds_u35,
+        f"Under 3.5 {pU35}%. Safest goals pick.")
+
+    # Dedupe & sort by confidence
+    seen = set()
+    unique = []
+    for c in candidates:
+        if c["pick"] not in seen:
+            seen.add(c["pick"])
+            unique.append(c)
+    candidates = unique
+    candidates.sort(key=lambda x: x["conf"], reverse=True)
+
+    # SAFEST — highest confidence with min odds 1.15
+    safe_pool = [c for c in candidates if c["odds"] >= 1.15]
+    if not safe_pool:
+        safe_pool = candidates
+    best = max(safe_pool, key=lambda x: (x["conf"], x["edge"]))
+
+    # BEST VALUE — highest edge
+    value_pool = [c for c in candidates if c["edge"] > 2 and c["odds"] >= 1.30]
+    value_pool.sort(key=lambda x: x["edge"], reverse=True)
+    value_picks = value_pool[:3]
+
     h_form = "".join(HISTORICAL_STATS.get(home, {}).get("form", [])[:5]) or "N/A"
     a_form = "".join(HISTORICAL_STATS.get(away, {}).get("form", [])[:5]) or "N/A"
+
     h2h_str = "No H2H data"
     if h2h_games:
         h2h_str = (f"H2H last {len(h2h_games)}: {home} {h2h_home_wins}W "
                    f"{h2h_draws}D {h2h_away_wins}W, BTTS {h2h_btts}/{len(h2h_games)}, "
                    f"Avg {h2h_avg_goals:.1f} goals")
+
     explanation = best["reason"]
-    if vb:
-        explanation += (f"\n💎 VALUE: {vb[0]['market']} @ {vb[0]['odds']} "
-                        f"(edge +{vb[0]['edge']}%)")
+    if value_picks:
+        v = value_picks[0]
+        explanation += f"\n💎 VALUE: {v['pick']} @ {v['odds']} (edge +{v['edge']}%)"
     explanation += ("\nTop scorelines: "
                     + ", ".join(f"{s[0]} ({s[1]}%)" for s in dc["top_scorelines"][:3]))
+
     return {
         "best_market": best["market"],
         "best_pick": best["pick"],
         "odds": float(best["odds"]),
         "confidence": best["conf"],
+        "edge": best.get("edge", 0),
         "explanation": explanation,
-        "verdict": f"AI: {best['market']} — {best['pick']} @ {best['odds']}",
-        "all_markets": markets[:5],
-        "value_bets": vb,
+        "verdict": f"AI: {best['market']} — {best['pick']} @ {best['odds']} ({best['conf']}%)",
+        "all_markets": candidates,
+        "top_markets": candidates[:6],
+        "value_bets": value_picks,
+        "market_table": market_table,
         "h2h": h2h_str,
         "form": f"Form: {home} [{h_form}] | {away} [{a_form}]",
         "standings": (f"xG: {home} {dc['home_xg']} — {away} {dc['away_xg']} | "
-                      f"1X2: {mp['home_win']}%/{mp['draw']}%/{mp['away_win']}%"),
+                      f"1X2: {p1}%/{pX}%/{p2}%"),
         "live_odds_source": data.get("source", "Model"),
         "winnings_1000": calc(best["odds"], 1000),
         "dc": dc,
@@ -1017,26 +1063,55 @@ def handle_region(chat_id, user_id, region, user, db, limit):
 
 def send_full_prediction(chat_id, fixture, db=None, user=None):
     p = predict_match(fixture)
+    mt = p.get("market_table", {})
+
     msg = (
         f"⚽ {fixture['home']} vs {fixture['away']}\n"
-        f"🏆 {fixture.get('league','')} | {fixture.get('date','')} {fixture.get('time','')} WAT\n\n"
+        f"🏆 {fixture.get('league','')} | {fixture.get('time','')} WAT\n\n"
         f"📊 {p['form']}\n"
         f"📈 {p['h2h']}\n"
         f"📉 {p['standings']}\n\n"
-        f"✅ {p['verdict']} ({p['confidence']}%)\n"
-        f"📝 {p['explanation']}\n\n"
-        f"📋 ALL MARKETS:\n"
+        "📋 FULL MARKET PROBABILITIES\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏠 Home Win (1):  {mt.get('1',0):.1f}%\n"
+        f"🤝 Draw (X):      {mt.get('X',0):.1f}%\n"
+        f"✈️ Away Win (2):  {mt.get('2',0):.1f}%\n\n"
+        "🎯 DOUBLE CHANCE\n"
+        f"   1X: {mt.get('1X',0):.1f}%   |   X2: {mt.get('X2',0):.1f}%   |   12: {mt.get('12',0):.1f}%\n\n"
+        "⚽ BOTH TEAMS TO SCORE\n"
+        f"   Yes: {mt.get('BTTS Yes',0):.1f}%   |   No: {mt.get('BTTS No',0):.1f}%\n\n"
+        "🥅 GOALS MARKET\n"
+        f"   Over 1.5: {mt.get('Over 1.5',0):.1f}%\n"
+        f"   Over 2.5: {mt.get('Over 2.5',0):.1f}%   |   Under 2.5: {mt.get('Under 2.5',0):.1f}%\n"
+        f"   Over 3.5: {mt.get('Over 3.5',0):.1f}%   |   Under 3.5: {mt.get('Under 3.5',0):.1f}%\n"
     )
-    for m in p["all_markets"][:4]:
-        msg += f"• {m['market']}: {m['pick']} @ {m['odds']} ({m['conf']}%)\n"
+
+    msg += (
+        "\n🏆 AI RECOMMENDATION\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"✅ SAFEST: {p['best_pick']}\n"
+        f"   @ {p['odds']}  ·  {p['confidence']}% confidence"
+    )
+    if p.get("edge", 0) > 0:
+        msg += f"  ·  +{p['edge']}% edge"
+    msg += "\n"
+
     if p.get("value_bets"):
-        msg += "\n💎 VALUE BETS:\n"
-        for v in p["value_bets"][:2]:
-            msg += f"• {v['market']} @ {v['odds']} (edge +{v['edge']}%)\n"
+        msg += "\n💎 BEST VALUE BETS:\n"
+        for v in p["value_bets"][:3]:
+            msg += f"   • {v['pick']} @ {v['odds']} ({v['conf']}% · +{v['edge']}% edge)\n"
+
+    msg += "\n🎯 TOP SAFEST PICKS (by confidence):\n"
+    for i, c in enumerate(p.get("top_markets", [])[:5], 1):
+        msg += f"   {i}. {c['pick']} @ {c['odds']}  ({c['conf']}%)\n"
+
     msg += (f"\n💰 N1000 → N{p['winnings_1000']}\n"
-            f"📡 {p['live_odds_source']}\n{p['disclaimer']}")
+            f"📡 {p['live_odds_source']}\n"
+            f"{p['disclaimer']}")
+
     kb = get_main_keyboard(is_admin(user.user_id)) if user else None
     send_message(chat_id, msg, reply_markup=kb)
+
     if db and user:
         try:
             pred = Prediction(
@@ -1321,7 +1396,6 @@ def handle_admin_test_channel(chat_id):
 # BUTTON TEXT ROUTER
 # ──────────────────────────────────────────────
 def map_button_to_command(text, admin):
-    """Map reply-keyboard button text to internal action."""
     t = text.strip()
     low = t.lower()
     if "today" in low and "fixture" in low:
@@ -1567,9 +1641,9 @@ def process_update(upd):
                 admin_line = "\n🔐 You have ADMIN access. Tap 🔐 Admin Panel.\n" if admin else ""
                 send_message(chat_id, (
                     f"👋 Welcome to BetMaster Pro, {first_name or 'friend'}!\n\n"
-                    f"🧠 Dixon-Coles AI prediction engine\n"
+                    f"🧠 Dixon-Coles AI · 13 markets\n"
                     f"🌍 Europe · Asia · Americas · National\n"
-                    f"💎 Value-bet detection\n"
+                    f"💎 Full market probabilities + value bets\n"
                     f"🚀 N1M Challenge — ₦1,000 → ₦1,000,000\n"
                     f"{admin_line}\n"
                     f"Your tier: {tier}\n"
@@ -1579,7 +1653,7 @@ def process_update(upd):
                     f"/today, /europeanleagues, /asianleagues, /americanleagues,\n"
                     f"/national, /million, /betslip, /stats, /leaderboard, /refer,\n"
                     f"/profile, /upgrade, /help\n\n"
-                    f"Or send: Team A vs Team B for instant analysis.\n\n{BOT_LINK}"
+                    f"Or send: Team A vs Team B for full analysis.\n\n{BOT_LINK}"
                 ), reply_markup=main_kb)
 
             elif low.startswith("/help"):
@@ -1737,6 +1811,7 @@ def process_update(upd):
                     f"✅ 10 predictions/day (vs FREE 2)\n"
                     f"✅ 🚀 N1M Challenge — N1,000 → N1,000,000\n"
                     f"✅ 10-match personalized betslips\n"
+                    f"✅ Full market probabilities (13 markets)\n"
                     f"✅ Value-bet alerts\n"
                     f"✅ Personalized fixture ranking\n\n"
                     f"Plans:\n"
@@ -1887,11 +1962,13 @@ async def on_startup():
 @app.get("/")
 async def home():
     return {
-        "status": "BetMaster Pro — Dixon-Coles AI · Admin + Reply Keyboard",
+        "status": "BetMaster Pro — Dixon-Coles AI · Full Versatile Markets",
         "admins": len(ADMIN_IDS),
         "features": ["regions", "n1m", "betslip", "stats", "leaderboard",
                      "referrals", "personalization", "vip", "admin_panel",
-                     "reply_keyboard"],
+                     "reply_keyboard", "all_markets", "value_bets"],
+        "markets_supported": ["1X2", "DC 1X/X2/12", "BTTS Yes/No",
+                              "O/U 1.5/2.5/3.5"],
         "brain": f"{len(HISTORICAL_STATS)} teams · H2H {len(H2H_CACHE)}",
         "regions": ["european", "asian", "american", "national"],
     }
@@ -2180,7 +2257,7 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
   <section class="hero">
     <div class="badge"><span class="badge-dot"></span>🚀 N1,000 → N1,000,000 Challenge</div>
     <h1>Unlock AI-Powered<br>Football Predictions</h1>
-    <p>Dixon-Coles model · Value-bet detection · Global coverage · N1M accumulator · Personalized picks</p>
+    <p>13 markets · Dixon-Coles model · Value-bet detection · Global coverage · N1M accumulator · Personalized picks</p>
     <div class="trust-row">
       <div class="trust-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>SSL Secured</div>
       <div class="trust-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Flutterwave</div>
@@ -2196,7 +2273,7 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
         <ul class="plan-features">
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>10 predictions</li>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>N1M challenge</li>
-          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>10-match betslip</li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>All 13 markets</li>
         </ul>
         <a href="/pay?plan=daily&uid={{UID}}" class="btn btn-primary" onclick="return startPay(this)"><span class="spinner"></span><span class="btn-label">Get 24h Access</span></a>
       </div>
@@ -2231,14 +2308,14 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
     <div class="features-grid">
       <div class="feature-card"><div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg></div><h3>Dixon-Coles Model</h3><p>The industry-standard bivariate Poisson model used by pro bookmakers.</p></div>
       <div class="feature-card"><div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div><h3>N1M Challenge</h3><p>Turn ₦1,000 into ₦1,000,000 with our high-odds accumulator builder.</p></div>
-      <div class="feature-card"><div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div><h3>Personalized</h3><p>Learns your favorite leagues and markets. Ranks fixtures for you.</p></div>
+      <div class="feature-card"><div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div><h3>All 13 Markets</h3><p>1X2, DC, BTTS, O/U 1.5/2.5/3.5 with probabilities for every pick.</p></div>
     </div>
   </section>
   <section>
     <div class="section-title">Loved by Bettors</div>
     <div class="testimonials">
       <div class="testimonial"><div class="stars">★★★★★</div><p>"Won 3 accumulators in my first week. The N1M challenge is insane."</p><div class="testimonial-author"><div class="avatar">E</div><span>Emeka · Lagos</span></div></div>
-      <div class="testimonial"><div class="stars">★★★★★</div><p>"Finally a bot that explains its reasoning. Dixon-Coles is legit."</p><div class="testimonial-author"><div class="avatar">T</div><span>Tunde · Abuja</span></div></div>
+      <div class="testimonial"><div class="stars">★★★★★</div><p>"Finally a bot that shows every market with probabilities."</p><div class="testimonial-author"><div class="avatar">T</div><span>Tunde · Abuja</span></div></div>
       <div class="testimonial"><div class="stars">★★★★★</div><p>"I stopped guessing. This pays for itself every single month."</p><div class="testimonial-author"><div class="avatar">C</div><span>Chidi · PH</span></div></div>
     </div>
   </section>
@@ -2303,7 +2380,7 @@ SUCCESS_TEMPLATE = r"""<!DOCTYPE html>
   <div class="check"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></div>
   <div class="plan-badge">{{PLAN}} Activated</div>
   <h1>Welcome to VIP!</h1>
-  <p>Your payment was confirmed. Return to the bot to access premium AI predictions, the N1M challenge, and personalized betslips.</p>
+  <p>Your payment was confirmed. Return to the bot to access premium AI predictions, all 13 markets, the N1M challenge, and personalized betslips.</p>
   <a href="{{BOT_LINK}}" class="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>Open Telegram Bot</a>
 </div>
 </body>
