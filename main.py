@@ -1,7 +1,8 @@
 """
 main.py — BetMaster Pro
 Global soccer prediction bot with Dixon-Coles modeling, value-bet detection,
-multi-region coverage, N1M challenge, engagement systems, and pro payment flow.
+multi-region coverage, N1M challenge, engagement systems, admin panel,
+and persistent reply keyboard menu.
 
 Data sources: ESPN, TheSportsDB, OpenFootball, The Odds API.
 """
@@ -45,18 +46,66 @@ FOOTYSTATS_KEY = os.getenv("FOOTYSTATS_KEY", "")
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL") or "https://betmaster-p09f.onrender.com"
 BOT_LINK = "https://t.me/Betmasterpro_bot"
 BOT_HANDLE = "@Betmasterpro_bot"
-ADMIN_ID = os.getenv("ADMIN_ID", "")
+
+ADMIN_IDS_RAW = os.getenv("ADMIN_ID", "")
+ADMIN_IDS = set()
+for _aid in ADMIN_IDS_RAW.split(","):
+    _aid = _aid.strip()
+    if _aid:
+        try:
+            ADMIN_IDS.add(int(_aid))
+        except Exception:
+            pass
+
+
+def is_admin(user_id) -> bool:
+    try:
+        return int(user_id) in ADMIN_IDS
+    except Exception:
+        return False
+
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+# ──────────────────────────────────────────────
+# REPLY KEYBOARD (persistent bottom menu)
+# ──────────────────────────────────────────────
+BTN_TODAY = "⚽ Today's Fixtures"
+BTN_N1M = "🚀 N1M Challenge"
+BTN_EUROPE = "🇪🇺 European Leagues"
+BTN_ASIA = "🇯🇵 Asian Leagues"
+BTN_AMERICA = "🇺🇸 American Leagues"
+BTN_BETSLIP = "💎 VIP Betslip"
+
+def get_main_keyboard(is_admin_user: bool = False):
+    """Persistent reply keyboard shown under the message bar."""
+    keyboard = [
+        [{"text": BTN_TODAY}, {"text": BTN_N1M}],
+        [{"text": BTN_EUROPE}, {"text": BTN_ASIA}],
+        [{"text": BTN_AMERICA}, {"text": BTN_BETSLIP}],
+    ]
+    if is_admin_user:
+        keyboard.append([{"text": "🔐 Admin Panel"}])
+    return {
+        "keyboard": keyboard,
+        "resize_keyboard": True,
+        "is_persistent": True,
+        "input_field_placeholder": "Tap a button or send Team A vs Team B",
+    }
+
+
+def get_remove_keyboard():
+    return {"remove_keyboard": True}
+
 
 # ──────────────────────────────────────────────
 # DATABASE
 # ──────────────────────────────────────────────
 from sqlalchemy import (
     create_engine, Column, Integer, String, Boolean, Float,
-    DateTime, Text, ForeignKey, func
+    DateTime, Text, func
 )
-from sqlalchemy.orm import sessionmaker, declarative_base, relationship
+from sqlalchemy.orm import sessionmaker, declarative_base
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./betmaster.db")
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
@@ -98,6 +147,7 @@ class User(Base):
     fav_markets = Column(Text, default="")
     n1m_bankroll = Column(Float, default=0.0)
     n1m_best = Column(Float, default=0.0)
+    is_banned = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_seen = Column(DateTime, default=datetime.utcnow)
 
@@ -123,20 +173,6 @@ class Referral(Base):
     referrer_id = Column(Integer, index=True)
     referred_id = Column(Integer, index=True)
     rewarded = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-
-class TrackedBet(Base):
-    __tablename__ = "tracked_bets"
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, index=True)
-    match = Column(String)
-    market = Column(String)
-    pick = Column(String)
-    odds = Column(Float)
-    stake = Column(Float, default=1000.0)
-    result = Column(String, default="pending")
-    profit = Column(Float, default=0.0)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -188,10 +224,11 @@ def get_user(db, user_id, username="", first_name=""):
             referral_code = ""; referral_count = 0
             fav_leagues = ""; fav_markets = ""
             n1m_bankroll = 0.0; n1m_best = 0.0
+            is_banned = False
         return Dummy()
 
 
-def activate_vip(uid, plan):
+def activate_vip(uid, plan, silent=False):
     db = SessionLocal()
     try:
         user = get_user(db, int(uid))
@@ -202,19 +239,36 @@ def activate_vip(uid, plan):
         user.vip_plan = plan
         user.daily_count = 0
         db.commit()
-        send_message(int(uid), (
-            f"🎉 VIP {plan.upper()} ACTIVATED!\n\n"
-            f"Valid until: {expiry}\n\n"
-            f"You now have:\n"
-            f"✅ 10 predictions/day\n"
-            f"✅ N1M challenge access\n"
-            f"✅ 10-match betslip generator\n"
-            f"✅ Value-bet alerts\n\n"
-            f"Open the bot: {BOT_LINK}"
-        ))
+        if not silent:
+            send_message(int(uid), (
+                f"🎉 VIP {plan.upper()} ACTIVATED!\n\n"
+                f"Valid until: {expiry}\n\n"
+                f"You now have:\n"
+                f"✅ 10 predictions/day\n"
+                f"✅ N1M challenge access\n"
+                f"✅ 10-match betslip generator\n"
+                f"✅ Value-bet alerts\n\n"
+                f"Open the bot: {BOT_LINK"
+            ), reply_markup=get_main_keyboard(is_admin(int(uid))))
         return True
     except Exception as e:
         print(f"activate_vip error: {e}")
+        return False
+    finally:
+        db.close()
+
+
+def revoke_vip(uid):
+    db = SessionLocal()
+    try:
+        user = get_user(db, int(uid))
+        user.is_vip = False
+        user.vip_expiry = ""
+        user.vip_plan = ""
+        db.commit()
+        return True
+    except Exception as e:
+        print(f"revoke_vip error: {e}")
         return False
     finally:
         db.close()
@@ -255,13 +309,11 @@ def load_brain():
             reader = csv.DictReader(io.StringIO(r.text))
             rows = list(reader)[-120:]
             league_goals = []
-
             for row in rows:
                 home = row.get("HomeTeam", "")
                 away = row.get("AwayTeam", "")
                 if not home or not away:
                     continue
-
                 for team in [home, away]:
                     if team not in HISTORICAL_STATS:
                         HISTORICAL_STATS[team] = {
@@ -271,22 +323,18 @@ def load_brain():
                             "over25": 0, "over35": 0, "clean": 0,
                             "failed_score": 0, "league": code,
                         }
-
                 try:
                     fthg = int(row.get("FTHG", 0) or 0)
                     ftag = int(row.get("FTAG", 0) or 0)
                 except Exception:
                     continue
-
                 league_goals.append(fthg + ftag)
-
                 HISTORICAL_STATS[home]["games"] += 1
                 HISTORICAL_STATS[away]["games"] += 1
                 HISTORICAL_STATS[home]["scored"] += fthg
                 HISTORICAL_STATS[home]["conceded"] += ftag
                 HISTORICAL_STATS[away]["scored"] += ftag
                 HISTORICAL_STATS[away]["conceded"] += fthg
-
                 if fthg > 0 and ftag > 0:
                     HISTORICAL_STATS[home]["btts"] += 1
                     HISTORICAL_STATS[away]["btts"] += 1
@@ -295,7 +343,6 @@ def load_brain():
                     if ftag == 0: HISTORICAL_STATS[away]["failed_score"] += 1
                     if ftag == 0: HISTORICAL_STATS[home]["clean"] += 1
                     if fthg == 0: HISTORICAL_STATS[away]["clean"] += 1
-
                 if fthg + ftag > 1:
                     HISTORICAL_STATS[home]["over15"] += 1
                     HISTORICAL_STATS[away]["over15"] += 1
@@ -305,7 +352,6 @@ def load_brain():
                 if fthg + ftag > 3:
                     HISTORICAL_STATS[home]["over35"] += 1
                     HISTORICAL_STATS[away]["over35"] += 1
-
                 if fthg > ftag:
                     HISTORICAL_STATS[home]["wins"] += 1
                     HISTORICAL_STATS[home]["form"].append("W")
@@ -321,7 +367,6 @@ def load_brain():
                     HISTORICAL_STATS[home]["form"].append("L")
                     HISTORICAL_STATS[away]["wins"] += 1
                     HISTORICAL_STATS[away]["form"].append("W")
-
                 h2h_key = f"{home}_vs_{away}"
                 if h2h_key not in H2H_CACHE:
                     H2H_CACHE[h2h_key] = []
@@ -331,27 +376,22 @@ def load_brain():
                     "total": fthg + ftag,
                     "btts": 1 if fthg > 0 and ftag > 0 else 0,
                 })
-
             if league_goals:
                 LEAGUE_AVG_GOALS[code] = sum(league_goals) / len(league_goals)
-
             for k in HISTORICAL_STATS:
                 if len(HISTORICAL_STATS[k]["form"]) > 5:
                     HISTORICAL_STATS[k]["form"] = HISTORICAL_STATS[k]["form"][-5:]
-
         except Exception as e:
             print(f"Brain load error {code}: {e}")
-
     for code in codes:
         if code not in LEAGUE_AVG_GOALS:
             LEAGUE_AVG_GOALS[code] = 2.65
-
     print(f"BRAIN loaded {len(HISTORICAL_STATS)} teams, "
           f"H2H {len(H2H_CACHE)} pairs, {len(LEAGUE_AVG_GOALS)} leagues")
 
 
 # ──────────────────────────────────────────────
-# DIXON-COLES MODEL
+# DIXON-COLES
 # ──────────────────────────────────────────────
 def estimate_team_strengths(team_name, league_code="E0"):
     stats = HISTORICAL_STATS.get(team_name)
@@ -375,10 +415,8 @@ def dixon_coles_predict(home_team, away_team, league_code="E0",
     h = estimate_team_strengths(home_team, league_code)
     a = estimate_team_strengths(away_team, league_code)
     league_avg_per_team = LEAGUE_AVG_GOALS.get(league_code, 2.65) / 2.0
-
     home_xg = max(0.3, min(4.5, h["attack"] * a["defense"] * league_avg_per_team * math.exp(home_advantage)))
     away_xg = max(0.3, min(4.5, a["attack"] * h["defense"] * league_avg_per_team))
-
     probs = np.zeros((max_goals, max_goals))
     for i in range(max_goals):
         for j in range(max_goals):
@@ -389,7 +427,6 @@ def dixon_coles_predict(home_team, away_team, league_code="E0",
                 elif i == 1 and j == 0: p *= (1 + away_xg * rho)
                 elif i == 1 and j == 1: p *= (1 - rho)
             probs[i][j] = max(0, p)
-
     total = probs.sum()
     if total <= 0:
         return {"home_win": 33.3, "draw": 33.3, "away_win": 33.3,
@@ -398,21 +435,17 @@ def dixon_coles_predict(home_team, away_team, league_code="E0",
                 "over25": 50.0, "over35": 50.0, "top_cs": "1-0",
                 "home_strength": h, "away_strength": a}
     probs /= total
-
     home_win = float(np.tril(probs, -1).sum()) * 100
     draw = float(np.trace(probs)) * 100
     away_win = float(np.triu(probs, 1).sum()) * 100
     btts = float(probs[1:, 1:].sum()) * 100
-
     over25 = sum(probs[i][j] for i in range(max_goals) for j in range(max_goals) if i + j >= 3) * 100
     over15 = sum(probs[i][j] for i in range(max_goals) for j in range(max_goals) if i + j >= 2) * 100
     over35 = sum(probs[i][j] for i in range(max_goals) for j in range(max_goals) if i + j >= 4) * 100
-
     scores = [(f"{i}-{j}", round(float(probs[i][j]) * 100, 2))
               for i in range(max_goals) for j in range(max_goals)]
     scores.sort(key=lambda x: x[1], reverse=True)
     top_scorelines = scores[:5]
-
     return {
         "home_win": round(home_win, 1), "draw": round(draw, 1),
         "away_win": round(away_win, 1),
@@ -454,9 +487,7 @@ def predict_match(data):
     league_code = data.get("country", "E0")
     if league_code not in LEAGUE_AVG_GOALS:
         league_code = "E0"
-
     dc = dixon_coles_predict(home, away, league_code=league_code)
-
     h2h_key = f"{home}_vs_{away}"
     h2h_rev = f"{away}_vs_{home}"
     h2h_games = H2H_CACHE.get(h2h_key, []) + H2H_CACHE.get(h2h_rev, [])
@@ -469,20 +500,16 @@ def predict_match(data):
     h2h_draws = len([g for g in h2h_games if g["result"] == "D"])
     h2h_btts = len([g for g in h2h_games if g["btts"] == 1])
     h2h_avg_goals = (sum(g["total"] for g in h2h_games) / len(h2h_games)) if h2h_games else 0
-
     dc_h, dc_d, dc_a = dc["home_win"], dc["draw"], dc["away_win"]
     if h2h_games and len(h2h_games) >= 3:
         w = 0.20
         dc_h = dc_h * (1 - w) + (h2h_home_wins / len(h2h_games) * 100) * w
         dc_d = dc_d * (1 - w) + (h2h_draws / len(h2h_games) * 100) * w
         dc_a = dc_a * (1 - w) + (h2h_away_wins / len(h2h_games) * 100) * w
-
     tot = dc_h + dc_d + dc_a
     if tot > 0:
         dc_h, dc_d, dc_a = dc_h / tot * 100, dc_d / tot * 100, dc_a / tot * 100
-
     mp = {"home_win": round(dc_h, 1), "draw": round(dc_d, 1), "away_win": round(dc_a, 1)}
-
     odds = {
         "home": float(data.get("odds_h", 0) or 0),
         "draw": float(data.get("odds_d", 0) or 0),
@@ -491,9 +518,7 @@ def predict_match(data):
     if odds["home"] <= 1.01: odds["home"] = round(100 / max(mp["home_win"], 5), 2)
     if odds["draw"] <= 1.01: odds["draw"] = round(100 / max(mp["draw"], 5), 2)
     if odds["away"] <= 1.01: odds["away"] = round(100 / max(mp["away_win"], 5), 2)
-
     markets = []
-
     best_1x2 = max(
         [("Home Win", mp["home_win"], odds["home"]),
          ("Draw", mp["draw"], odds["draw"]),
@@ -507,7 +532,6 @@ def predict_match(data):
             "reason": f"Dixon-Coles: {best_1x2[0]} {best_1x2[1]:.1f}%. "
                       f"xG {home} {dc['home_xg']} vs {away} {dc['away_xg']}.",
         })
-
     dc_1x = mp["home_win"] + mp["draw"]
     dc_x2 = mp["draw"] + mp["away_win"]
     if dc_1x >= 70:
@@ -524,7 +548,6 @@ def predict_match(data):
             "conf": round(dc_x2, 1),
             "reason": f"Model: {dc_x2:.1f}% chance {away} does not lose.",
         })
-
     if dc["btts"] >= 60:
         markets.append({
             "market": "BTTS", "pick": "BTTS Yes",
@@ -538,7 +561,6 @@ def predict_match(data):
             "conf": round(100 - dc["btts"], 1),
             "reason": f"BTTS probability only {dc['btts']}%.",
         })
-
     if dc["over25"] >= 60:
         markets.append({
             "market": "O/U", "pick": "Over 2.5 Goals",
@@ -553,14 +575,12 @@ def predict_match(data):
             "conf": round(100 - dc["over25"], 1),
             "reason": f"Under 2.5 probability {100 - dc['over25']:.1f}%.",
         })
-
     if dc["over15"] >= 75:
         markets.append({
             "market": "O/U", "pick": "Over 1.5 Goals", "odds": 1.30,
             "conf": round(dc["over15"], 1),
             "reason": f"Over 1.5 probability {dc['over15']}% — banker.",
         })
-
     if not markets:
         top = max(
             [("Home Win", mp["home_win"], odds["home"]),
@@ -573,27 +593,22 @@ def predict_match(data):
             "conf": round(top[1], 1),
             "reason": f"Best available — {top[0]} at {top[1]:.1f}%.",
         })
-
     markets.sort(key=lambda x: x["conf"], reverse=True)
     best = markets[0]
     vb = find_value_bets(mp, odds)
-
     h_form = "".join(HISTORICAL_STATS.get(home, {}).get("form", [])[:5]) or "N/A"
     a_form = "".join(HISTORICAL_STATS.get(away, {}).get("form", [])[:5]) or "N/A"
-
     h2h_str = "No H2H data"
     if h2h_games:
         h2h_str = (f"H2H last {len(h2h_games)}: {home} {h2h_home_wins}W "
                    f"{h2h_draws}D {h2h_away_wins}W, BTTS {h2h_btts}/{len(h2h_games)}, "
                    f"Avg {h2h_avg_goals:.1f} goals")
-
     explanation = best["reason"]
     if vb:
         explanation += (f"\n💎 VALUE: {vb[0]['market']} @ {vb[0]['odds']} "
                         f"(edge +{vb[0]['edge']}%)")
     explanation += ("\nTop scorelines: "
                     + ", ".join(f"{s[0]} ({s[1]}%)" for s in dc["top_scorelines"][:3]))
-
     return {
         "best_market": best["market"],
         "best_pick": best["pick"],
@@ -627,7 +642,6 @@ def fetch_the_odds_api(date_obj):
     if (ODDS_CACHE["time"] and
             (datetime.now() - ODDS_CACHE["time"]).seconds < 600 and ODDS_CACHE["data"]):
         return ODDS_CACHE["data"]
-
     iso = date_obj.strftime("%Y-%m-%d")
     odds_map = {}
     sports = [
@@ -680,7 +694,6 @@ def fetch_the_odds_api(date_obj):
                     continue
         except Exception:
             continue
-
     ODDS_CACHE = {"time": datetime.now(), "data": odds_map}
     return odds_map
 
@@ -722,7 +735,6 @@ def fetch_real_fixtures(days_ahead=0, limit=10, region=None):
         fixtures = fetch_by_region(target, region, limit=limit)
     else:
         fixtures = fetch_today_fixtures(target, limit=limit)
-
     if not fixtures and days_ahead == 0:
         for i in range(1, 8):
             t2 = (datetime.utcnow() + timedelta(hours=1) + timedelta(days=i)).date()
@@ -732,7 +744,6 @@ def fetch_real_fixtures(days_ahead=0, limit=10, region=None):
                 fixtures = fetch_today_fixtures(t2, limit=limit)
             if fixtures:
                 break
-
     return enrich_with_odds(fixtures, target)
 
 
@@ -745,7 +756,6 @@ def update_user_preferences(db, user, fixture, market):
         if fixture.get("league"):
             fav_l.add(fixture["league"])
         user.fav_leagues = ",".join(list(fav_l)[-10:])
-
         fav_m = set((user.fav_markets or "").split(",")) - {""}
         if market:
             fav_m.add(market)
@@ -774,10 +784,8 @@ def generate_n1m_slip(fixtures, user, stake=1000.0, target=1000000.0):
     target_odds = target / stake
     scored = [(f, score_fixture_for_user(f, user)) for f in fixtures]
     scored.sort(key=lambda x: x[1], reverse=True)
-
     picks = []
     total_odds = 1.0
-
     for fixture, _ in scored:
         if total_odds >= target_odds:
             break
@@ -801,10 +809,8 @@ def generate_n1m_slip(fixtures, user, stake=1000.0, target=1000000.0):
         total_odds *= float(best["odds"])
         if len(picks) >= 15:
             break
-
     total_odds = round(total_odds, 2)
     potential_win = round(stake * total_odds, 2)
-
     return {
         "picks": picks, "total_odds": total_odds, "stake": stake,
         "potential_win": potential_win,
@@ -822,7 +828,6 @@ def generate_betslip(fixtures, user=None):
         scored = [(f, score_fixture_for_user(f, user)) for f in fixtures]
         scored.sort(key=lambda x: x[1], reverse=True)
         fixtures = [f for f, _ in scored]
-
     picks = []
     total = 1.0
     for f in fixtures[:10]:
@@ -834,7 +839,6 @@ def generate_betslip(fixtures, user=None):
             "market": p["best_market"], "conf": p["confidence"],
         })
         total *= float(p["odds"])
-
     total = round(total, 2)
     return {
         "picks": picks, "total_odds": total,
@@ -880,7 +884,6 @@ def award_referral(db, referrer_code, new_user_id):
         referral = Referral(referrer_id=referrer.user_id, referred_id=new_user_id, rewarded=True)
         db.add(referral)
         referrer.referral_count = (referrer.referral_count or 0) + 1
-
         if referrer.is_vip and referrer.vip_expiry:
             try:
                 current = datetime.strptime(referrer.vip_expiry, "%Y-%m-%d").date()
@@ -890,16 +893,14 @@ def award_referral(db, referrer_code, new_user_id):
         else:
             referrer.is_vip = True
             new_expiry = date.today() + timedelta(days=7)
-
         referrer.vip_expiry = str(new_expiry)
         db.commit()
-
         send_message(referrer.user_id, (
             f"🎁 Referral Reward!\n\n"
             f"Someone you referred just paid. "
             f"You got 7 free VIP days — now valid until {new_expiry}.\n\n"
             f"Keep sharing your link: {BOT_LINK}?start=ref_{referrer.referral_code}"
-        ))
+        ), reply_markup=get_main_keyboard(is_admin(referrer.user_id)))
     except Exception as e:
         print(f"Referral error: {e}")
 
@@ -911,43 +912,27 @@ app = FastAPI()
 
 
 def send_message(chat_id, text, reply_markup=None, parse_mode=None):
-    """
-    Fail-safe Telegram sender.
-    Tries with parse_mode if given, falls back to plain text if Telegram rejects entities.
-    Never raises — always logs errors.
-    """
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         if len(text) > 4000:
             text = text[:4000] + "..."
-
         payload = {"chat_id": chat_id, "text": text}
         if reply_markup:
             payload["reply_markup"] = reply_markup
         if parse_mode:
             payload["parse_mode"] = parse_mode
-
         r = requests.post(url, json=payload, timeout=15)
-
         if r.status_code == 200:
             return r.json()
-
-        # Log the failure
         print(f"[send_message] HTTP {r.status_code} chat={chat_id}: {r.text[:300]}")
-
-        # If parse_mode was used and Telegram rejected it, retry as plain text
         if parse_mode:
             payload.pop("parse_mode", None)
-            # Remove markdown markers so plain text still reads OK
             clean = text.replace("*", "").replace("_", " ").replace("`", "")
             payload["text"] = clean
             r2 = requests.post(url, json=payload, timeout=15)
             if r2.status_code == 200:
                 return r2.json()
-            print(f"[send_message] fallback also failed: {r2.status_code} {r2.text[:200]}")
-
         return r.json() if r.content else None
-
     except Exception as e:
         print(f"[send_message] Exception: {e}")
         return None
@@ -975,7 +960,7 @@ def set_bot_menu():
             f"https://api.telegram.org/bot{BOT_TOKEN}/setMyCommands",
             json={"commands": commands}, timeout=10,
         )
-        print(f"[setMyCommands] {r.status_code}: {r.text[:200]}")
+        print(f"[setMyCommands] {r.status_code}")
     except Exception as e:
         print(f"[setMyCommands] error: {e}")
 
@@ -993,46 +978,40 @@ REGION_INFO = {
 
 def handle_region(chat_id, user_id, region, user, db, limit):
     header, pretty = REGION_INFO.get(region, ("FIXTURES", region.title()))
-
+    kb = get_main_keyboard(is_admin(user_id))
     if user.daily_count >= limit:
         send_message(chat_id,
                      f"🚫 Daily limit reached ({user.daily_count}/{limit}).\n\n"
                      f"Upgrade for 10/day + N1M challenge:\n"
-                     f"{RENDER_URL}/subscribe?uid={user_id}")
+                     f"{RENDER_URL}/subscribe?uid={user_id}",
+                     reply_markup=kb)
         return
-
-    send_message(chat_id, f"🔎 Scanning {pretty} fixtures...")
-
+    send_message(chat_id, f"🔎 Scanning {pretty} fixtures...", reply_markup=kb)
     fixtures = fetch_real_fixtures(days_ahead=0, limit=15, region=region)
     if not fixtures:
         for i in range(1, 8):
             fixtures = fetch_real_fixtures(days_ahead=i, limit=15, region=region)
             if fixtures:
                 break
-
     if not fixtures:
-        send_message(chat_id, f"No {pretty} fixtures in the next 7 days.\n{BOT_LINK}")
+        send_message(chat_id, f"No {pretty} fixtures in the next 7 days.\n{BOT_LINK}", reply_markup=kb)
         return
-
     scored = [(f, score_fixture_for_user(f, user)) for f in fixtures]
     scored.sort(key=lambda x: x[1], reverse=True)
     fixtures = [f for f, _ in scored]
-
     msg = f"{header}\n📅 {fixtures[0].get('date', 'Today')}\n\n"
     for i, f in enumerate(fixtures, 1):
         star = "⭐ " if score_fixture_for_user(f, user) >= 50 else ""
         msg += (f"{i}. {star}{f['home']} vs {f['away']}\n"
                 f"   🏆 {f.get('league', '')}\n"
                 f"   🕐 {f.get('time', '')} WAT\n\n")
-
-    msg += f"({user.daily_count}/{limit}) — Tap below for analysis\n{BOT_LINK}"
-
-    keyboard = {"inline_keyboard": [
+    msg += f"({user.daily_count}/{limit}) — Tap below for analysis"
+    inline_kb = {"inline_keyboard": [
         [{"text": f"🧠 Analyze {pretty} Top 5", "callback_data": f"predict_{region}"}],
         [{"text": "💰 N1M Challenge", "callback_data": "n1m_challenge"},
          {"text": "🎯 VIP Betslip", "callback_data": "generate_betslip"}],
     ]}
-    send_message(chat_id, msg, reply_markup=keyboard)
+    send_message(chat_id, msg, reply_markup=inline_kb)
 
 
 def send_full_prediction(chat_id, fixture, db=None, user=None):
@@ -1049,17 +1028,14 @@ def send_full_prediction(chat_id, fixture, db=None, user=None):
     )
     for m in p["all_markets"][:4]:
         msg += f"• {m['market']}: {m['pick']} @ {m['odds']} ({m['conf']}%)\n"
-
     if p.get("value_bets"):
         msg += "\n💎 VALUE BETS:\n"
         for v in p["value_bets"][:2]:
             msg += f"• {v['market']} @ {v['odds']} (edge +{v['edge']}%)\n"
-
     msg += (f"\n💰 N1000 → N{p['winnings_1000']}\n"
             f"📡 {p['live_odds_source']}\n{p['disclaimer']}")
-
-    send_message(chat_id, msg)
-
+    kb = get_main_keyboard(is_admin(user.user_id)) if user else None
+    send_message(chat_id, msg, reply_markup=kb)
     if db and user:
         try:
             pred = Prediction(
@@ -1079,7 +1055,8 @@ def send_full_prediction(chat_id, fixture, db=None, user=None):
 
 
 def handle_n1m(chat_id, user, db):
-    if not user.is_vip:
+    kb = get_main_keyboard(is_admin(user.user_id))
+    if not user.is_vip and not is_admin(user.user_id):
         send_message(chat_id, (
             f"🚀 N1M Challenge — VIP Only\n\n"
             f"Turn ₦1,000 into ₦1,000,000 with a single accumulator.\n\n"
@@ -1087,11 +1064,9 @@ def handle_n1m(chat_id, user, db):
             f"✅ Built by Dixon-Coles model\n"
             f"✅ Regenerate anytime\n\n"
             f"👉 {RENDER_URL}/subscribe?uid={user.user_id}"
-        ))
+        ), reply_markup=kb)
         return
-
-    send_message(chat_id, "🚀 Building your N1M slip...\nThis takes ~15 seconds.")
-
+    send_message(chat_id, "🚀 Building your N1M slip...\nThis takes ~15 seconds.", reply_markup=kb)
     fixtures = fetch_real_fixtures(days_ahead=0, limit=40)
     if len(fixtures) < 8:
         for i in range(1, 8):
@@ -1102,24 +1077,21 @@ def handle_n1m(chat_id, user, db):
                     fixtures.append(ef)
             if len(fixtures) >= 20:
                 break
-
     if len(fixtures) < 8:
-        send_message(chat_id, f"Not enough fixtures today ({len(fixtures)}). Try again later.")
+        send_message(chat_id, f"Not enough fixtures today ({len(fixtures)}). Try again later.", reply_markup=kb)
         return
-
     slip = generate_n1m_slip(fixtures, user, stake=1000, target=1000000)
-
     if not slip["picks"]:
-        send_message(chat_id, "Could not build a slip. Try again later.")
+        send_message(chat_id, "Could not build a slip. Try again later.", reply_markup=kb)
         return
-
-    user.n1m_bankroll = slip["stake"]
-    if slip["potential_win"] > (user.n1m_best or 0):
-        user.n1m_best = slip["potential_win"]
-    db.commit()
-
+    try:
+        user.n1m_bankroll = slip["stake"]
+        if slip["potential_win"] > (user.n1m_best or 0):
+            user.n1m_best = slip["potential_win"]
+        db.commit()
+    except Exception:
+        pass
     target_status = "✅ TARGET MET" if slip["target_met"] else "⚠️ Slightly below target"
-
     msg = (
         f"🚀 N1M CHALLENGE — {datetime.now().strftime('%d %b %Y')}\n\n"
         f"💰 Stake: N{slip['stake']:.0f}\n"
@@ -1132,28 +1104,241 @@ def handle_n1m(chat_id, user, db):
         msg += (f"{i}. {p['match']}\n"
                 f"   {p['market']}: {p['pick']} @ {p['odds']} ({p['conf']}%)\n"
                 f"   🏆 {p['league']}\n\n")
-
-    msg += (f"⚠️ N1M slip is high-risk. Higher odds = higher chance of failure. "
-            f"Only stake what you can afford to lose.\n\n"
-            f"Regenerate with new picks: tap below.\n{BOT_LINK}")
-
-    kb = {"inline_keyboard": [[
+    msg += (f"⚠️ N1M slip is high-risk. Only stake what you can afford to lose.\n\n"
+            f"Regenerate with new picks: tap below.")
+    inline_kb = {"inline_keyboard": [[
         {"text": "🔄 Regenerate Slip", "callback_data": "n1m_regen"},
         {"text": "💎 Go VIP Monthly", "url": f"{RENDER_URL}/subscribe?uid={user.user_id}"},
     ]]}
-    send_message(chat_id, msg, reply_markup=kb)
+    send_message(chat_id, msg, reply_markup=inline_kb)
 
+
+# ──────────────────────────────────────────────
+# ADMIN HANDLERS
+# ──────────────────────────────────────────────
+def handle_admin_panel(chat_id, user):
+    db = SessionLocal()
     try:
-        for p in slip["picks"]:
-            pred = Prediction(
-                user_id=user.user_id, match=p["match"], league=p["league"],
-                market=p["market"], pick=p["pick"], odds=p["odds"],
-                confidence=p["conf"], match_date=str(date.today()),
-            )
-            db.add(pred)
-        db.commit()
+        total_users = db.query(User).count()
+        total_vip = db.query(User).filter(User.is_vip == True).count()
+        total_preds = db.query(Prediction).count()
+    except Exception:
+        total_users = total_vip = total_preds = 0
+    finally:
+        db.close()
+    msg = (
+        f"🔐 ADMIN PANEL\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 Bot Overview:\n"
+        f"• Total users: {total_users}\n"
+        f"• VIP users: {total_vip}\n"
+        f"• Free users: {total_users - total_vip}\n"
+        f"• Total predictions: {total_preds}\n"
+        f"• Brain: {len(HISTORICAL_STATS)} teams\n"
+        f"• H2H pairs: {len(H2H_CACHE)}\n\n"
+        f"🛠 Commands:\n"
+        f"• /admin_stats — detailed stats\n"
+        f"• /admin_users — list users\n"
+        f"• /admin_user <uid> — user details\n"
+        f"• /admin_grant <uid> <plan> — grant VIP\n"
+        f"• /admin_revoke <uid> — remove VIP\n"
+        f"• /admin_broadcast <msg> — mass message\n"
+        f"• /admin_channels — test channel post\n\n"
+        f"✨ Full access — no limits.\n"
+        f"Admin ID: {user.user_id}"
+    )
+    send_message(chat_id, msg, reply_markup=get_main_keyboard(True))
+
+
+def handle_admin_stats(chat_id):
+    db = SessionLocal()
+    try:
+        total_users = db.query(User).count()
+        total_vip = db.query(User).filter(User.is_vip == True).count()
+        total_preds = db.query(Prediction).count()
+        week_ago = datetime.utcnow() - timedelta(days=7)
+        new_this_week = db.query(User).filter(User.created_at >= week_ago).count()
+        top_pred = db.query(User).order_by(User.total_predictions.desc()).first()
+        top_ref = db.query(User).order_by(User.referral_count.desc()).first()
+        vip_today = db.query(User).filter(
+            User.is_vip == True,
+            User.last_seen >= datetime.utcnow() - timedelta(days=1)
+        ).count()
+        msg = (
+            f"📊 GLOBAL STATS\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Users:\n"
+            f"• Total: {total_users}\n"
+            f"• VIP: {total_vip} ({round(total_vip/max(total_users,1)*100,1)}%)\n"
+            f"• New (7d): {new_this_week}\n"
+            f"• VIP active (24h): {vip_today}\n\n"
+            f"Activity:\n"
+            f"• Predictions logged: {total_preds}\n"
+            f"• Brain teams: {len(HISTORICAL_STATS)}\n"
+            f"• H2H pairs: {len(H2H_CACHE)}\n"
+            f"• Leagues loaded: {len(LEAGUE_AVG_GOALS)}\n\n"
+            f"Top performers:\n"
+        )
+        if top_pred:
+            msg += f"• Most active: {top_pred.first_name or top_pred.user_id} ({top_pred.total_predictions} preds)\n"
+        if top_ref:
+            msg += f"• Top referrer: {top_ref.first_name or top_ref.user_id} ({top_ref.referral_count} refs)\n"
+        send_message(chat_id, msg, reply_markup=get_main_keyboard(True))
     except Exception as e:
-        print(f"N1M log error: {e}")
+        send_message(chat_id, f"Stats error: {e}")
+    finally:
+        db.close()
+
+
+def handle_admin_users(chat_id, page=0):
+    db = SessionLocal()
+    try:
+        users = db.query(User).order_by(User.last_seen.desc())\
+            .offset(page * 20).limit(20).all()
+        if not users:
+            send_message(chat_id, "No users on this page.", reply_markup=get_main_keyboard(True))
+            return
+        msg = f"👥 USERS (page {page+1})\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        for u in users:
+            tier = "💎" if u.is_vip else "🆓"
+            name = (u.first_name or u.username or f"User{u.user_id}")[:20]
+            msg += (f"{tier} {name}\n"
+                    f"   ID: {u.user_id} | {u.daily_count}/day\n"
+                    f"   Last: {u.last_seen.strftime('%d %b %H:%M') if u.last_seen else 'never'}\n\n")
+        kb = {"inline_keyboard": [[
+            {"text": "⬅️ Prev", "callback_data": f"admin_users_{max(0,page-1)}"},
+            {"text": "Next ➡️", "callback_data": f"admin_users_{page+1}"},
+        ]]}
+        send_message(chat_id, msg, reply_markup=kb)
+    except Exception as e:
+        send_message(chat_id, f"Users error: {e}")
+    finally:
+        db.close()
+
+
+def handle_admin_user_lookup(chat_id, uid):
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter(User.user_id == uid).first()
+        if not u:
+            send_message(chat_id, f"❌ User {uid} not found.", reply_markup=get_main_keyboard(True))
+            return
+        tier = "💎 VIP" if u.is_vip else "🆓 FREE"
+        status = "🚫 BANNED" if u.is_banned else "✅ Active"
+        msg = (
+            f"🔍 USER DETAILS\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Name: {u.first_name or '—'}\n"
+            f"Username: @{u.username or '—'}\n"
+            f"ID: {u.user_id}\n"
+            f"Status: {status}\n"
+            f"Tier: {tier}\n"
+            f"VIP until: {u.vip_expiry or '—'}\n"
+            f"Plan: {u.vip_plan or '—'}\n\n"
+            f"📊 Activity:\n"
+            f"• Daily count: {u.daily_count}\n"
+            f"• Total predictions: {u.total_predictions or 0}\n"
+            f"• Wins/Losses: {u.total_wins or 0}/{u.total_losses or 0}\n"
+            f"• Streak: {u.streak or 0} (best {u.best_streak or 0})\n"
+            f"• Referrals: {u.referral_count or 0}\n"
+            f"• Referral code: {u.referral_code or '—'}\n"
+            f"• N1M bankroll: N{u.n1m_bankroll or 0:.0f}\n"
+            f"• N1M best: N{u.n1m_best or 0:.0f}\n\n"
+            f"⭐ Fav leagues: {(u.fav_leagues or '—')[:80]}\n"
+            f"⭐ Fav markets: {(u.fav_markets or '—')[:60]}\n\n"
+            f"📅 Created: {u.created_at.strftime('%Y-%m-%d') if u.created_at else '—'}\n"
+            f"👁 Last seen: {u.last_seen.strftime('%Y-%m-%d %H:%M') if u.last_seen else '—'}"
+        )
+        send_message(chat_id, msg, reply_markup=get_main_keyboard(True))
+    except Exception as e:
+        send_message(chat_id, f"Lookup error: {e}")
+    finally:
+        db.close()
+
+
+def handle_admin_grant(chat_id, uid, plan):
+    if plan not in ("daily", "weekly", "monthly"):
+        send_message(chat_id, f"❌ Invalid plan: {plan}. Use: daily, weekly, monthly",
+                     reply_markup=get_main_keyboard(True))
+        return
+    if activate_vip(uid, plan, silent=False):
+        send_message(chat_id, f"✅ Granted {plan} VIP to user {uid}",
+                     reply_markup=get_main_keyboard(True))
+    else:
+        send_message(chat_id, f"❌ Failed to grant VIP to {uid}",
+                     reply_markup=get_main_keyboard(True))
+
+
+def handle_admin_revoke(chat_id, uid):
+    if revoke_vip(uid):
+        send_message(chat_id, f"✅ Revoked VIP for user {uid}",
+                     reply_markup=get_main_keyboard(True))
+        send_message(int(uid), "Your VIP access has been revoked by admin.")
+    else:
+        send_message(chat_id, f"❌ Failed to revoke {uid}",
+                     reply_markup=get_main_keyboard(True))
+
+
+def handle_admin_broadcast(chat_id, message):
+    db = SessionLocal()
+    try:
+        users = db.query(User).all()
+    finally:
+        db.close()
+    send_message(chat_id, f"📢 Broadcasting to {len(users)} users...")
+    sent = 0
+    failed = 0
+    for u in users:
+        try:
+            r = send_message(u.user_id, f"📢 ANNOUNCEMENT\n\n{message}")
+            if r and r.get("ok"):
+                sent += 1
+            else:
+                failed += 1
+            time.sleep(0.05)
+        except Exception:
+            failed += 1
+    send_message(chat_id, f"✅ Broadcast complete.\nSent: {sent}\nFailed: {failed}",
+                 reply_markup=get_main_keyboard(True))
+
+
+def handle_admin_test_channel(chat_id):
+    if not CHANNEL_ID:
+        send_message(chat_id, "❌ CHANNEL_ID not configured.",
+                     reply_markup=get_main_keyboard(True))
+        return
+    msg = f"🧪 Admin test post\n\nBot: {BOT_HANDLE}\nBrain: {len(HISTORICAL_STATS)} teams\n{BOT_LINK}"
+    r = send_message(CHANNEL_ID, msg)
+    if r and r.get("ok"):
+        send_message(chat_id, "✅ Test message sent to channel.",
+                     reply_markup=get_main_keyboard(True))
+    else:
+        send_message(chat_id, f"❌ Failed: {r}", reply_markup=get_main_keyboard(True))
+
+
+# ──────────────────────────────────────────────
+# BUTTON TEXT ROUTER
+# ──────────────────────────────────────────────
+def map_button_to_command(text, admin):
+    """Map reply-keyboard button text to internal action."""
+    t = text.strip()
+    # Normalize by removing emojis
+    low = t.lower()
+    if "today" in low and "fixture" in low:
+        return "/today"
+    if "n1m" in low or "challenge" in low:
+        return "/million"
+    if "european" in low:
+        return "/europeanleagues"
+    if "asian" in low:
+        return "/asianleagues"
+    if "american" in low:
+        return "/americanleagues"
+    if "betslip" in low or "vip" in low and "match" in low:
+        return "/betslip"
+    if admin and "admin" in low and "panel" in low:
+        return "/admin"
+    return None
 
 
 # ──────────────────────────────────────────────
@@ -1169,11 +1354,17 @@ def process_update(upd):
             chat_id = cq["message"]["chat"]["id"]
             from_id = cq["from"]["id"]
             data = cq.get("data", "")
-
+            admin = is_admin(from_id)
             requests.post(f"{base}/answerCallbackQuery",
                           json={"callback_query_id": cq["id"], "text": "Working..."},
                           timeout=5)
-
+            if data.startswith("admin_users_") and admin:
+                try:
+                    page = int(data.replace("admin_users_", ""))
+                except Exception:
+                    page = 0
+                handle_admin_users(chat_id, page)
+                return
             db2 = SessionLocal()
             try:
                 user2 = get_user(
@@ -1181,14 +1372,16 @@ def process_update(upd):
                     cq["from"].get("username", ""),
                     cq["from"].get("first_name", ""),
                 )
-                limit = 10 if user2.is_vip else 2
+                limit = 999999 if admin else (10 if user2.is_vip else 2)
+                main_kb = get_main_keyboard(admin)
 
                 if data.startswith("predict_"):
                     region = data.replace("predict_", "")
                     if user2.daily_count >= limit:
                         send_message(chat_id,
                                      f"🚫 Limit {user2.daily_count}/{limit}\n\n"
-                                     f"Upgrade: {RENDER_URL}/subscribe?uid={from_id}")
+                                     f"Upgrade: {RENDER_URL}/subscribe?uid={from_id}",
+                                     reply_markup=main_kb)
                         return
                     fixtures = fetch_real_fixtures(days_ahead=0, limit=5, region=region)
                     if not fixtures:
@@ -1197,7 +1390,8 @@ def process_update(upd):
                             if fixtures:
                                 break
                     if not fixtures:
-                        send_message(chat_id, f"No fixtures for {region}.\n{BOT_LINK}")
+                        send_message(chat_id, f"No fixtures for {region}.\n{BOT_LINK}",
+                                     reply_markup=main_kb)
                         return
                     send_message(chat_id, f"🧠 AI Analysis — {region.title()}")
                     for f in fixtures[:5]:
@@ -1212,16 +1406,17 @@ def process_update(upd):
                     if user2.daily_count >= limit:
                         send_message(chat_id,
                                      f"🚫 Limit {user2.daily_count}/{limit}\n"
-                                     f"{RENDER_URL}/subscribe?uid={from_id}")
+                                     f"{RENDER_URL}/subscribe?uid={from_id}",
+                                     reply_markup=main_kb)
                         return
                     fixtures = fetch_real_fixtures(days_ahead=0, limit=5)
                     if not fixtures:
-                        send_message(chat_id, f"No fixtures today.\n{BOT_LINK}")
+                        send_message(chat_id, f"No fixtures today.\n{BOT_LINK}",
+                                     reply_markup=main_kb)
                         return
                     scored = [(f, score_fixture_for_user(f, user2)) for f in fixtures]
                     scored.sort(key=lambda x: x[1], reverse=True)
                     fixtures = [f for f, _ in scored]
-
                     send_message(chat_id, "🧠 Personalized AI Analysis")
                     for f in fixtures[:5]:
                         if user2.daily_count >= limit:
@@ -1232,11 +1427,12 @@ def process_update(upd):
                         time.sleep(0.8)
 
                 elif data == "generate_betslip":
-                    if not user2.is_vip:
+                    if not user2.is_vip and not admin:
                         send_message(chat_id,
                                      f"💎 VIP only.\n\n"
                                      f"Get 10-match betslips + N1M challenge:\n"
-                                     f"{RENDER_URL}/subscribe?uid={from_id}")
+                                     f"{RENDER_URL}/subscribe?uid={from_id}",
+                                     reply_markup=main_kb)
                         return
                     fixtures = fetch_real_fixtures(days_ahead=0, limit=20)
                     if len(fixtures) < 5:
@@ -1250,7 +1446,8 @@ def process_update(upd):
                                 break
                     slip = generate_betslip(fixtures, user2)
                     if not slip:
-                        send_message(chat_id, f"Not enough fixtures ({len(fixtures)}).")
+                        send_message(chat_id, f"Not enough fixtures ({len(fixtures)}).",
+                                     reply_markup=main_kb)
                         return
                     msg = (f"💰 VIP BETSLIP — {datetime.now().strftime('%d %b %Y')}\n"
                            f"10 matches · Dixon-Coles · Personalized\n\n")
@@ -1259,13 +1456,10 @@ def process_update(upd):
                                 f"   {p['market']}: {p['pick']} @ {p['odds']} ({p['conf']}%)\n\n")
                     msg += (f"TOTAL ODDS: {slip['total_odds']}\n"
                             f"N1000 → N{slip['winnings_1000']}\n"
-                            f"N2000 → N{slip['winnings_2000']}\n{BOT_LINK}")
-                    send_message(chat_id, msg)
+                            f"N2000 → N{slip['winnings_2000']}")
+                    send_message(chat_id, msg, reply_markup=main_kb)
 
-                elif data == "n1m_challenge":
-                    handle_n1m(chat_id, user2, db2)
-
-                elif data == "n1m_regen":
+                elif data in ("n1m_challenge", "n1m_regen"):
                     handle_n1m(chat_id, user2, db2)
 
             finally:
@@ -1283,13 +1477,84 @@ def process_update(upd):
         username = msg["from"].get("username", "")
         first_name = msg["from"].get("first_name", "")
         low = text.lower()
+        admin = is_admin(user_id)
+        main_kb = get_main_keyboard(admin)
+
+        # ── Map reply-keyboard button to command ──
+        mapped = map_button_to_command(text, admin)
+        if mapped:
+            low = mapped.lower()
+            text = mapped  # treat as command
 
         db = SessionLocal()
         try:
             user = get_user(db, user_id, username, first_name)
             FREE, VIP = 2, 10
-            cur = VIP if user.is_vip else FREE
+            if admin:
+                cur = 999999
+            else:
+                cur = VIP if user.is_vip else FREE
 
+            # ── Admin routing ──
+            if low.startswith("/admin") and admin:
+                parts = text.split(maxsplit=2)
+                subcmd = parts[0].lower()
+                if subcmd == "/admin" or low.strip() == "/admin":
+                    handle_admin_panel(chat_id, user)
+                elif subcmd == "/admin_stats":
+                    handle_admin_stats(chat_id)
+                elif subcmd == "/admin_users":
+                    handle_admin_users(chat_id, 0)
+                elif subcmd == "/admin_user":
+                    if len(parts) >= 2:
+                        try:
+                            handle_admin_user_lookup(chat_id, int(parts[1]))
+                        except Exception:
+                            send_message(chat_id, "Usage: /admin_user <uid>",
+                                         reply_markup=main_kb)
+                    else:
+                        send_message(chat_id, "Usage: /admin_user <uid>",
+                                     reply_markup=main_kb)
+                elif subcmd == "/admin_grant":
+                    if len(parts) >= 3:
+                        try:
+                            handle_admin_grant(chat_id, int(parts[1]), parts[2].lower())
+                        except Exception:
+                            send_message(chat_id, "Usage: /admin_grant <uid> <plan>",
+                                         reply_markup=main_kb)
+                    else:
+                        send_message(chat_id, "Usage: /admin_grant <uid> <plan>",
+                                     reply_markup=main_kb)
+                elif subcmd == "/admin_revoke":
+                    if len(parts) >= 2:
+                        try:
+                            handle_admin_revoke(chat_id, int(parts[1]))
+                        except Exception:
+                            send_message(chat_id, "Usage: /admin_revoke <uid>",
+                                         reply_markup=main_kb)
+                    else:
+                        send_message(chat_id, "Usage: /admin_revoke <uid>",
+                                     reply_markup=main_kb)
+                elif subcmd == "/admin_broadcast":
+                    bmsg = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else ""
+                    if bmsg:
+                        threading.Thread(target=handle_admin_broadcast,
+                                         args=(chat_id, bmsg), daemon=True).start()
+                    else:
+                        send_message(chat_id, "Usage: /admin_broadcast <message>",
+                                     reply_markup=main_kb)
+                elif subcmd == "/admin_channels":
+                    handle_admin_test_channel(chat_id)
+                else:
+                    send_message(chat_id, "Unknown admin command. Use /admin",
+                                 reply_markup=main_kb)
+                return
+
+            if low.startswith("/admin"):
+                send_message(chat_id, "⛔ Admin access required.", reply_markup=main_kb)
+                return
+
+            # ── Referral tracking ──
             if low.startswith("/start") and "ref_" in low:
                 try:
                     ref_code = text.split("ref_")[1].split()[0].strip()
@@ -1301,52 +1566,46 @@ def process_update(upd):
 
             # ── /start ──
             if low.startswith("/start"):
-                tier = "💎 VIP" if user.is_vip else "🆓 FREE"
+                tier = "🔐 ADMIN" if admin else ("💎 VIP" if user.is_vip else "🆓 FREE")
+                admin_line = "\n🔐 You have ADMIN access. Tap 🔐 Admin Panel.\n" if admin else ""
                 send_message(chat_id, (
                     f"👋 Welcome to BetMaster Pro, {first_name or 'friend'}!\n\n"
                     f"🧠 Dixon-Coles AI prediction engine\n"
                     f"🌍 Europe · Asia · Americas · National\n"
                     f"💎 Value-bet detection\n"
-                    f"🚀 N1M Challenge — ₦1,000 → ₦1,000,000\n\n"
+                    f"🚀 N1M Challenge — ₦1,000 → ₦1,000,000\n"
+                    f"{admin_line}\n"
                     f"Your tier: {tier}\n"
-                    f"Daily limit: {user.daily_count}/{cur}\n\n"
-                    f"Commands:\n"
-                    f"/today — Today's top picks\n"
-                    f"/europeanleagues — Premier League, La Liga...\n"
-                    f"/asianleagues — CSL, J1, Saudi Pro...\n"
-                    f"/americanleagues — MLS, Liga MX, Brasileirão\n"
-                    f"/national — FIFA / national teams\n"
-                    f"/million — 🚀 N1M Challenge\n"
-                    f"/betslip — VIP 10-match accumulator\n"
-                    f"/stats — Your accuracy & streaks\n"
-                    f"/leaderboard — Top users\n"
-                    f"/refer — Invite friends, earn VIP\n"
-                    f"/profile — Your profile\n"
-                    f"/upgrade — Go VIP\n\n"
+                    f"Daily limit: {user.daily_count if not admin else '∞'}/{cur if not admin else '∞'}\n\n"
+                    f"👇 Use the menu buttons below\n\n"
+                    f"Or type commands:\n"
+                    f"/today, /europeanleagues, /asianleagues, /americanleagues,\n"
+                    f"/national, /million, /betslip, /stats, /leaderboard, /refer,\n"
+                    f"/profile, /upgrade, /help\n\n"
                     f"Or send: Team A vs Team B for instant analysis.\n\n{BOT_LINK}"
-                ))
+                ), reply_markup=main_kb)
 
             # ── /help ──
             elif low.startswith("/help"):
+                admin_line = ("\n🔐 Admin Commands:\n"
+                              "• /admin — panel\n"
+                              "• /admin_stats, /admin_users\n"
+                              "• /admin_user <uid>, /admin_grant <uid> <plan>\n"
+                              "• /admin_revoke <uid>, /admin_broadcast <msg>\n") if admin else ""
                 send_message(chat_id, (
                     f"📖 BetMaster Pro Help\n\n"
+                    f"Use the menu buttons below, or type:\n\n"
                     f"Fixtures:\n"
                     f"• /today — Top fixtures globally\n"
-                    f"• /europeanleagues — European fixtures\n"
-                    f"• /asianleagues — Asian fixtures\n"
-                    f"• /americanleagues — American fixtures\n"
-                    f"• /national — FIFA matches\n\n"
+                    f"• /europeanleagues, /asianleagues, /americanleagues, /national\n\n"
                     f"VIP Features:\n"
                     f"• /million — N1M accumulator challenge\n"
                     f"• /betslip — 10-match personalized accumulator\n\n"
                     f"Account:\n"
-                    f"• /stats — Your accuracy & streak\n"
-                    f"• /leaderboard — Top 10 users\n"
-                    f"• /refer — Get 7 free VIP days per paying referral\n"
-                    f"• /profile — Full profile\n"
-                    f"• /upgrade — See VIP plans\n\n"
+                    f"• /stats, /leaderboard, /refer, /profile, /upgrade\n"
+                    f"{admin_line}\n"
                     f"FREE {FREE}/day · VIP {VIP}/day\n{BOT_LINK}"
-                ))
+                ), reply_markup=main_kb)
 
             elif low.startswith("/europeanleagues"):
                 handle_region(chat_id, user_id, "european", user, db, cur)
@@ -1361,56 +1620,58 @@ def process_update(upd):
                 handle_n1m(chat_id, user, db)
 
             elif low.startswith("/today"):
-                if user.daily_count >= cur:
+                if not admin and user.daily_count >= cur:
                     send_message(chat_id,
                                  f"🚫 Daily limit {user.daily_count}/{cur}\n"
-                                 f"Upgrade: {RENDER_URL}/subscribe?uid={user_id}")
+                                 f"Upgrade: {RENDER_URL}/subscribe?uid={user_id}",
+                                 reply_markup=main_kb)
                     return
-                send_message(chat_id, "🔎 Scanning today's fixtures...")
+                send_message(chat_id, "🔎 Scanning today's fixtures...", reply_markup=main_kb)
                 fixtures = fetch_real_fixtures(days_ahead=0, limit=10)
                 if not fixtures:
-                    send_message(chat_id, f"No fixtures today.\n{BOT_LINK}")
+                    send_message(chat_id, f"No fixtures today.\n{BOT_LINK}", reply_markup=main_kb)
                     return
                 scored = [(f, score_fixture_for_user(f, user)) for f in fixtures]
                 scored.sort(key=lambda x: x[1], reverse=True)
                 fixtures = [f for f, _ in scored]
-
                 msg_txt = f"⚽ TOP FIXTURES — {fixtures[0].get('date', 'Today')}\n\n"
                 for i, f in enumerate(fixtures, 1):
                     star = "⭐ " if score_fixture_for_user(f, user) >= 50 else ""
                     msg_txt += (f"{i}. {star}{f['home']} vs {f['away']}\n"
                                 f"   🏆 {f.get('league','')}\n"
                                 f"   🕐 {f.get('time','')} WAT\n\n")
-                msg_txt += f"({user.daily_count}/{cur}) Tap for analysis\n{BOT_LINK}"
-
-                kb = {"inline_keyboard": [
+                msg_txt += f"({user.daily_count}/{cur if not admin else '∞'}) Tap below for analysis"
+                inline_kb = {"inline_keyboard": [
                     [{"text": "🧠 Predict Top 5", "callback_data": "predict_top5"}],
                     [{"text": "🚀 N1M Challenge", "callback_data": "n1m_challenge"}],
                 ]}
-                send_message(chat_id, msg_txt, reply_markup=kb)
+                send_message(chat_id, msg_txt, reply_markup=inline_kb)
 
             elif low.startswith("/betslip"):
-                if not user.is_vip:
+                if not user.is_vip and not admin:
                     send_message(chat_id,
-                                 f"💎 VIP only.\n{RENDER_URL}/subscribe?uid={user_id}")
+                                 f"💎 VIP only.\n{RENDER_URL}/subscribe?uid={user_id}",
+                                 reply_markup=main_kb)
                     return
                 fixtures = fetch_real_fixtures(days_ahead=0, limit=20)
                 slip = generate_betslip(fixtures, user)
                 if not slip:
-                    send_message(chat_id, "Not enough fixtures for a 10-match slip.")
+                    send_message(chat_id, "Not enough fixtures for a 10-match slip.",
+                                 reply_markup=main_kb)
                     return
                 msg_txt = f"💰 VIP BETSLIP — {datetime.now().strftime('%d %b %Y')}\n\n"
                 for i, p in enumerate(slip["picks"], 1):
                     msg_txt += f"{i}. {p['match']}\n   {p['market']}: {p['pick']} @ {p['odds']}\n\n"
                 msg_txt += (f"TOTAL ODDS: {slip['total_odds']}\n"
                             f"N1000 → N{slip['winnings_1000']}\n"
-                            f"N2000 → N{slip['winnings_2000']}\n{BOT_LINK}")
-                send_message(chat_id, msg_txt)
+                            f"N2000 → N{slip['winnings_2000']}")
+                send_message(chat_id, msg_txt, reply_markup=main_kb)
 
             elif low.startswith("/stats"):
                 stats = get_user_stats(db, user_id)
+                admin_line = "\n🔐 ADMIN — unlimited access" if admin else ""
                 msg_txt = (
-                    f"📊 Your BetMaster Stats\n\n"
+                    f"📊 Your BetMaster Stats{admin_line}\n\n"
                     f"🔥 Current streak: {stats['streak']}\n"
                     f"🏆 Best streak: {stats['best_streak']}\n"
                     f"🎯 Total predictions: {stats['total']}\n"
@@ -1418,10 +1679,9 @@ def process_update(upd):
                     f"📈 Win rate: {stats['win_rate']}%\n\n"
                     f"🎁 Referrals: {stats['referrals']}\n"
                     f"🚀 N1M bankroll: N{stats['n1m_bankroll']:.0f} "
-                    f"(best: N{stats['n1m_best']:.0f})\n\n"
-                    f"{BOT_LINK}"
+                    f"(best: N{stats['n1m_best']:.0f})"
                 )
-                send_message(chat_id, msg_txt)
+                send_message(chat_id, msg_txt, reply_markup=main_kb)
 
             elif low.startswith("/leaderboard"):
                 try:
@@ -1429,18 +1689,16 @@ def process_update(upd):
                         .order_by(User.total_wins.desc()).limit(10).all()
                 except Exception:
                     top = []
-
                 msg_txt = "🏆 Leaderboard — Top Predictors\n\n"
                 if not top:
-                    msg_txt += "No stats yet. Be the first to top the chart!\n"
+                    msg_txt += "No stats yet.\n"
                 else:
                     for i, u in enumerate(top, 1):
                         medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
                         name = u.first_name or u.username or f"User{u.user_id}"
                         rate = round(u.total_wins / max(u.total_predictions, 1) * 100, 0)
                         msg_txt += f"{medal} {name} — {u.total_wins}W · {rate:.0f}%\n"
-                msg_txt += f"\n{BOT_LINK}"
-                send_message(chat_id, msg_txt)
+                send_message(chat_id, msg_txt, reply_markup=main_kb)
 
             elif low.startswith("/refer"):
                 ref_link = f"https://t.me/Betmasterpro_bot?start=ref_{user.referral_code}"
@@ -1450,14 +1708,13 @@ def process_update(upd):
                     f"Rewards:\n"
                     f"✅ You get 7 free VIP days when someone you refer pays\n"
                     f"✅ They get 20% off their first month\n\n"
-                    f"Your referrals: {user.referral_count or 0}\n\n"
-                    f"Share it, stack up VIP days free! 💎\n{BOT_LINK}"
+                    f"Your referrals: {user.referral_count or 0}"
                 )
-                send_message(chat_id, msg_txt)
+                send_message(chat_id, msg_txt, reply_markup=main_kb)
 
             elif low.startswith("/profile"):
                 stats = get_user_stats(db, user_id)
-                tier = "💎 VIP" if user.is_vip else "🆓 FREE"
+                tier = "🔐 ADMIN" if admin else ("💎 VIP" if user.is_vip else "🆓 FREE")
                 exp = user.vip_expiry if user.is_vip else "—"
                 fav_l = user.fav_leagues or "None yet"
                 msg_txt = (
@@ -1465,17 +1722,20 @@ def process_update(upd):
                     f"Name: {first_name or username or 'Anon'}\n"
                     f"Tier: {tier}\n"
                     f"VIP until: {exp}\n"
-                    f"Daily used: {user.daily_count}/{cur}\n\n"
+                    f"Daily used: {user.daily_count}/{cur if not admin else '∞'}\n\n"
                     f"📊 Stats:\n"
                     f"• Streak: {stats['streak']} (best {stats['best_streak']})\n"
                     f"• Win rate: {stats['win_rate']}% ({stats['wins']}/{stats['total']})\n"
                     f"• Referrals: {stats['referrals']}\n\n"
-                    f"⭐ Favorite leagues: {fav_l}\n\n"
-                    f"{BOT_LINK}"
+                    f"⭐ Favorite leagues: {fav_l}"
                 )
-                send_message(chat_id, msg_txt)
+                send_message(chat_id, msg_txt, reply_markup=main_kb)
 
             elif low.startswith("/upgrade"):
+                if admin:
+                    send_message(chat_id, "🔐 You're ADMIN — full access. No subscription needed.",
+                                 reply_markup=main_kb)
+                    return
                 send_message(chat_id, (
                     f"💎 VIP Benefits\n\n"
                     f"✅ 10 predictions/day (vs FREE 2)\n"
@@ -1488,22 +1748,22 @@ def process_update(upd):
                     f"• Weekly — N2,000\n"
                     f"• Monthly — N5,000 (save N3,000)\n\n"
                     f"👉 {RENDER_URL}/subscribe?uid={user_id}"
-                ))
+                ), reply_markup=main_kb)
 
             elif " vs " in low and 5 < len(text) < 100:
-                if user.daily_count >= cur:
+                if not admin and user.daily_count >= cur:
                     send_message(chat_id,
                                  f"🚫 Limit {user.daily_count}/{cur}\n"
-                                 f"{RENDER_URL}/subscribe?uid={user_id}")
+                                 f"{RENDER_URL}/subscribe?uid={user_id}",
+                                 reply_markup=main_kb)
                     return
                 try:
                     parts = re.split(r"\s+vs\s+", text, flags=re.IGNORECASE)
                     home = parts[0].strip().title()
                     away = parts[1].strip().title()
                 except Exception:
-                    send_message(chat_id, "Format: Team A vs Team B")
+                    send_message(chat_id, "Format: Team A vs Team B", reply_markup=main_kb)
                     return
-
                 all_f = fetch_real_fixtures(days_ahead=0, limit=100)
                 matched = next((f for f in all_f
                                 if home.lower() in f["home"].lower()
@@ -1512,7 +1772,6 @@ def process_update(upd):
                     matched = next((f for f in all_f
                                     if away.lower() in f["home"].lower()
                                     and home.lower() in f["away"].lower()), None)
-
                 data = matched or {
                     "home": home, "away": away, "league": "Custom",
                     "date": datetime.now().strftime("%Y-%m-%d"),
@@ -1524,7 +1783,9 @@ def process_update(upd):
                 db.commit()
 
             else:
-                send_message(chat_id, f"Unknown command. Try /help\n{BOT_LINK}")
+                send_message(chat_id,
+                             f"Unknown command. Use the menu below or /help\n{BOT_LINK}",
+                             reply_markup=main_kb)
 
         except Exception as e:
             print(f"Handler error: {e}")
@@ -1614,6 +1875,7 @@ threading.Thread(target=channel_scheduler, daemon=True).start()
 @app.on_event("startup")
 async def on_startup():
     set_bot_menu()
+    print(f"[startup] Admins configured: {ADMIN_IDS}")
     try:
         url = (f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
                f"?url={RENDER_URL}/webhook&drop_pending_updates=true")
@@ -1629,9 +1891,11 @@ async def on_startup():
 @app.get("/")
 async def home():
     return {
-        "status": "BetMaster Pro — Dixon-Coles AI · Full Professional",
+        "status": "BetMaster Pro — Dixon-Coles AI · Admin + Reply Keyboard",
+        "admins": len(ADMIN_IDS),
         "features": ["regions", "n1m", "betslip", "stats", "leaderboard",
-                     "referrals", "personalization", "vip"],
+                     "referrals", "personalization", "vip", "admin_panel",
+                     "reply_keyboard"],
         "brain": f"{len(HISTORICAL_STATS)} teams · H2H {len(H2H_CACHE)}",
         "regions": ["european", "asian", "american", "national"],
     }
@@ -1658,25 +1922,17 @@ async def set_webhook():
     return r
 
 
-@app.get("/debug-fixtures")
-async def debug_fixtures(date: str = "", region: str = ""):
+@app.get("/admin/whoami")
+async def admin_whoami(uid: str = ""):
     try:
-        target = (datetime.strptime(date, "%Y-%m-%d").date()
-                  if date else (datetime.utcnow() + timedelta(hours=1)).date())
-        if region:
-            fixtures = fetch_by_region(target, region, limit=10)
-        else:
-            fixtures = fetch_today_fixtures(target, limit=10)
-        return {
-            "requested_date": target.strftime("%Y-%m-%d"),
-            "region": region or "all",
-            "found": len(fixtures),
-            "fixtures": fixtures[:5],
-            "brain_size": len(HISTORICAL_STATS),
-            "h2h_pairs": len(H2H_CACHE),
-        }
-    except Exception as e:
-        return {"error": str(e), "trace": traceback.format_exc()}
+        uid_int = int(uid)
+    except Exception:
+        return {"error": "Provide ?uid=123456789"}
+    return {
+        "uid": uid_int,
+        "is_admin": is_admin(uid_int),
+        "admins_configured": len(ADMIN_IDS),
+    }
 
 
 # ═══ PAYMENT ROUTES ═══
@@ -1692,11 +1948,9 @@ async def pay(plan: str, uid: str):
         return HTMLResponse(render_failed_page("Payment system not configured.", uid), status_code=500)
     if plan not in ("daily", "weekly", "monthly"):
         return HTMLResponse(render_failed_page(f"Invalid plan: {plan}", uid), status_code=400)
-
     amounts = {"daily": 500, "weekly": 2000, "monthly": 5000}
     amount = amounts[plan]
     tx_ref = f"BETMASTER-{uid}-{plan}-{int(time.time())}"
-
     payload = {
         "tx_ref": tx_ref, "amount": amount, "currency": "NGN",
         "redirect_url": f"{RENDER_URL}/verify?tx_ref={tx_ref}&uid={uid}&plan={plan}",
@@ -1752,24 +2006,19 @@ async def flutterwave_webhook(request: Request):
         sig = request.headers.get("verif-hash", "")
         if FLW_WEBHOOK_HASH and sig != FLW_WEBHOOK_HASH:
             return JSONResponse({"status": "invalid"}, status_code=401)
-
         payload = await request.json()
         data = payload.get("data", {})
         if data.get("status", "").lower() not in ("successful", "completed"):
             return JSONResponse({"status": "ignored"})
-
         tx_ref = data.get("tx_ref", "")
         parts = tx_ref.split("-")
         if len(parts) < 4 or parts[0] != "BETMASTER":
             return JSONResponse({"status": "malformed"})
-
         uid, plan = parts[1], parts[2]
-
         verify = requests.get(
             f"https://api.flutterwave.com/v3/transactions/{data.get('id')}/verify",
             headers={"Authorization": f"Bearer {FLW_SECRET}"}, timeout=15,
         ).json()
-
         if (verify.get("status") == "success" and
                 verify.get("data", {}).get("status") == "successful"):
             db = SessionLocal()
@@ -1779,7 +2028,6 @@ async def flutterwave_webhook(request: Request):
                     return JSONResponse({"status": "already_active"})
             finally:
                 db.close()
-
             activate_vip(uid, plan)
             try:
                 db = SessionLocal()
@@ -1789,7 +2037,6 @@ async def flutterwave_webhook(request: Request):
                 db.close()
             except Exception:
                 pass
-
         return JSONResponse({"status": "success"})
     except Exception as e:
         print(f"Webhook error: {e}")
@@ -1808,11 +2055,9 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
 <title>BetMaster Pro — VIP Subscription</title>
 <style>
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
-  :root{--bg:#0a0e1a;--card:rgba(255,255,255,.03);--card-hover:rgba(255,255,255,.05);
-    --border:rgba(255,255,255,.08);--border-hover:rgba(255,255,255,.16);
-    --text:#e8ecf5;--text-dim:#8b94ab;--text-dimmer:#5a6378;
-    --green:#22c55e;--green-glow:rgba(34,197,94,.35);
-    --blue:#3b82f6;--blue-glow:rgba(59,130,246,.35);
+  :root{--bg:#0a0e1a;--card:rgba(255,255,255,.03);--border:rgba(255,255,255,.08);
+    --text:#e8ecf5;--text-dim:#8b94ab;--text-dimmer:#5a6378;--green:#22c55e;
+    --green-glow:rgba(34,197,94,.35);--blue:#3b82f6;--blue-glow:rgba(59,130,246,.35);
     --gold:#f5b945;--radius:16px;--radius-sm:10px;}
   html,body{height:100%;}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Arial,sans-serif;
@@ -1832,7 +2077,7 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
   .brand-logo svg{width:18px;height:18px;}
   .nav-cta{color:var(--text-dim);text-decoration:none;font-size:13px;font-weight:500;
     padding:8px 14px;border:1px solid var(--border);border-radius:999px;transition:all .2s;}
-  .nav-cta:hover{border-color:var(--border-hover);color:var(--text);}
+  .nav-cta:hover{border-color:rgba(255,255,255,.16);color:var(--text);}
   .hero{text-align:center;padding:40px 0 32px;}
   .badge{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:999px;
     background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.20);color:#4ade80;
@@ -1851,14 +2096,13 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
   .plans{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:40px 0 60px;}
   .plan{position:relative;background:var(--card);border:1px solid var(--border);
     border-radius:var(--radius);padding:26px 22px;transition:all .25s ease;overflow:hidden;}
-  .plan:hover{background:var(--card-hover);border-color:var(--border-hover);transform:translateY(-2px);}
+  .plan:hover{background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.16);transform:translateY(-2px);}
   .plan.featured{border-color:rgba(59,130,246,.4);
     background:linear-gradient(180deg,rgba(59,130,246,.06),rgba(59,130,246,.02));
     box-shadow:0 20px 60px -20px var(--blue-glow);}
   .ribbon{position:absolute;top:14px;right:14px;padding:4px 10px;
     background:linear-gradient(135deg,#3b82f6,#2563eb);color:white;font-size:10.5px;
-    font-weight:700;border-radius:6px;letter-spacing:.05em;text-transform:uppercase;
-    box-shadow:0 4px 12px rgba(59,130,246,.4);}
+    font-weight:700;border-radius:6px;letter-spacing:.05em;text-transform:uppercase;}
   .plan-name{font-size:13px;font-weight:600;color:var(--text-dim);letter-spacing:.08em;
     text-transform:uppercase;margin-bottom:12px;}
   .plan-price{display:flex;align-items:baseline;gap:6px;margin-bottom:6px;}
@@ -1871,8 +2115,7 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
   .plan-features li svg{width:15px;height:15px;color:var(--green);flex-shrink:0;margin-top:3px;}
   .btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;
     padding:14px 18px;border-radius:var(--radius-sm);font-size:14.5px;font-weight:600;
-    text-decoration:none;border:none;cursor:pointer;transition:all .2s;font-family:inherit;
-    position:relative;overflow:hidden;}
+    text-decoration:none;border:none;cursor:pointer;transition:all .2s;font-family:inherit;}
   .btn-primary{background:linear-gradient(135deg,#22c55e,#16a34a);color:white;
     box-shadow:0 8px 24px -8px var(--green-glow);}
   .btn-primary:hover{transform:translateY(-1px);}
@@ -1933,39 +2176,21 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
 <div class="container">
   <nav>
     <div class="brand">
-      <div class="brand-logo">
-        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
-        </svg>
-      </div>
+      <div class="brand-logo"><svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>
       <span>BetMaster Pro</span>
     </div>
     <a class="nav-cta" href="{{BOT_LINK}}">Open Bot</a>
   </nav>
-
   <section class="hero">
-    <div class="badge">
-      <span class="badge-dot"></span>
-      🚀 N1,000 → N1,000,000 Challenge
-    </div>
+    <div class="badge"><span class="badge-dot"></span>🚀 N1,000 → N1,000,000 Challenge</div>
     <h1>Unlock AI-Powered<br>Football Predictions</h1>
     <p>Dixon-Coles model · Value-bet detection · Global coverage · N1M accumulator · Personalized picks</p>
     <div class="trust-row">
-      <div class="trust-pill">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-        SSL Secured
-      </div>
-      <div class="trust-pill">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-        Flutterwave
-      </div>
-      <div class="trust-pill">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
-        Trusted by 5,000+
-      </div>
+      <div class="trust-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>SSL Secured</div>
+      <div class="trust-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Flutterwave</div>
+      <div class="trust-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>Trusted by 5,000+</div>
     </div>
   </section>
-
   <section style="padding-top:0;">
     <div class="plans">
       <div class="plan">
@@ -1977,11 +2202,8 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>N1M challenge</li>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>10-match betslip</li>
         </ul>
-        <a href="/pay?plan=daily&uid={{UID}}" class="btn btn-primary" onclick="return startPay(this)">
-          <span class="spinner"></span><span class="btn-label">Get 24h Access</span>
-        </a>
+        <a href="/pay?plan=daily&uid={{UID}}" class="btn btn-primary" onclick="return startPay(this)"><span class="spinner"></span><span class="btn-label">Get 24h Access</span></a>
       </div>
-
       <div class="plan featured">
         <div class="ribbon">Best Value</div>
         <div class="plan-name">Monthly</div>
@@ -1992,11 +2214,8 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Priority support</li>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Early access to features</li>
         </ul>
-        <a href="/pay?plan=monthly&uid={{UID}}" class="btn btn-blue" onclick="return startPay(this)">
-          <span class="spinner"></span><span class="btn-label">Get Monthly Access</span>
-        </a>
+        <a href="/pay?plan=monthly&uid={{UID}}" class="btn btn-blue" onclick="return startPay(this)"><span class="spinner"></span><span class="btn-label">Get Monthly Access</span></a>
       </div>
-
       <div class="plan">
         <div class="plan-name">Weekly</div>
         <div class="plan-price"><span class="amount">₦2,000</span><span class="period">/ week</span></div>
@@ -2006,96 +2225,45 @@ PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>All markets + value bets</li>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>Personalized picks</li>
         </ul>
-        <a href="/pay?plan=weekly&uid={{UID}}" class="btn btn-primary" onclick="return startPay(this)">
-          <span class="spinner"></span><span class="btn-label">Get Weekly Access</span>
-        </a>
+        <a href="/pay?plan=weekly&uid={{UID}}" class="btn btn-primary" onclick="return startPay(this)"><span class="spinner"></span><span class="btn-label">Get Weekly Access</span></a>
       </div>
     </div>
   </section>
-
   <section>
     <div class="section-title">Why BetMaster Pro?</div>
     <div class="section-sub">Built with the same models used by professional sportsbooks.</div>
     <div class="features-grid">
-      <div class="feature-card">
-        <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg></div>
-        <h3>Dixon-Coles Model</h3>
-        <p>The industry-standard bivariate Poisson model used by pro bookmakers.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div>
-        <h3>N1M Challenge</h3>
-        <p>Turn ₦1,000 into ₦1,000,000 with our high-odds accumulator builder.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div>
-        <h3>Personalized</h3>
-        <p>Learns your favorite leagues and markets. Ranks fixtures for you.</p>
-      </div>
+      <div class="feature-card"><div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg></div><h3>Dixon-Coles Model</h3><p>The industry-standard bivariate Poisson model used by pro bookmakers.</p></div>
+      <div class="feature-card"><div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div><h3>N1M Challenge</h3><p>Turn ₦1,000 into ₦1,000,000 with our high-odds accumulator builder.</p></div>
+      <div class="feature-card"><div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div><h3>Personalized</h3><p>Learns your favorite leagues and markets. Ranks fixtures for you.</p></div>
     </div>
   </section>
-
   <section>
     <div class="section-title">Loved by Bettors</div>
     <div class="testimonials">
-      <div class="testimonial">
-        <div class="stars">★★★★★</div>
-        <p>"Won 3 accumulators in my first week. The N1M challenge is insane."</p>
-        <div class="testimonial-author"><div class="avatar">E</div><span>Emeka · Lagos</span></div>
-      </div>
-      <div class="testimonial">
-        <div class="stars">★★★★★</div>
-        <p>"Finally a bot that explains its reasoning. Dixon-Coles is legit."</p>
-        <div class="testimonial-author"><div class="avatar">T</div><span>Tunde · Abuja</span></div>
-      </div>
-      <div class="testimonial">
-        <div class="stars">★★★★★</div>
-        <p>"I stopped guessing. This pays for itself every single month."</p>
-        <div class="testimonial-author"><div class="avatar">C</div><span>Chidi · PH</span></div>
-      </div>
+      <div class="testimonial"><div class="stars">★★★★★</div><p>"Won 3 accumulators in my first week. The N1M challenge is insane."</p><div class="testimonial-author"><div class="avatar">E</div><span>Emeka · Lagos</span></div></div>
+      <div class="testimonial"><div class="stars">★★★★★</div><p>"Finally a bot that explains its reasoning. Dixon-Coles is legit."</p><div class="testimonial-author"><div class="avatar">T</div><span>Tunde · Abuja</span></div></div>
+      <div class="testimonial"><div class="stars">★★★★★</div><p>"I stopped guessing. This pays for itself every single month."</p><div class="testimonial-author"><div class="avatar">C</div><span>Chidi · PH</span></div></div>
     </div>
   </section>
-
   <section>
     <div class="section-title">Frequently Asked</div>
     <div class="faq-list">
-      <div class="faq-item">
-        <div class="faq-q">How do I receive predictions after paying?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div>
-        <div class="faq-a">Once payment confirms, your Telegram is instantly upgraded. Use /today, /europeanleagues, /asianleagues, /americanleagues, /national, /million or /betslip.</div>
-      </div>
-      <div class="faq-item">
-        <div class="faq-q">What payment methods work?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div>
-        <div class="faq-a">Cards, bank transfer, USSD, mobile money via Flutterwave.</div>
-      </div>
-      <div class="faq-item">
-        <div class="faq-q">What is the N1M Challenge?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div>
-        <div class="faq-a">Our AI builds a high-odds accumulator where ₦1,000 could win up to ₦1,000,000. High risk, high reward — bet only what you can afford to lose.</div>
-      </div>
-      <div class="faq-item">
-        <div class="faq-q">Is my payment secure?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div>
-        <div class="faq-a">Yes. Processed by Flutterwave, PCI-DSS Level 1 certified. We never see your card details.</div>
-      </div>
-      <div class="faq-item">
-        <div class="faq-q">Do you guarantee winnings?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div>
-        <div class="faq-a">No service can guarantee winnings. We provide statistically-backed predictions with measurable edge. Bet responsibly.</div>
-      </div>
+      <div class="faq-item"><div class="faq-q">How do I receive predictions after paying?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div><div class="faq-a">Once payment confirms, your Telegram is instantly upgraded. Use the menu buttons or /today, /million, /betslip.</div></div>
+      <div class="faq-item"><div class="faq-q">What payment methods work?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div><div class="faq-a">Cards, bank transfer, USSD, mobile money via Flutterwave.</div></div>
+      <div class="faq-item"><div class="faq-q">What is the N1M Challenge?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div><div class="faq-a">Our AI builds a high-odds accumulator where ₦1,000 could win up to ₦1,000,000. High risk, high reward.</div></div>
+      <div class="faq-item"><div class="faq-q">Is my payment secure?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div><div class="faq-a">Yes. Processed by Flutterwave, PCI-DSS Level 1 certified.</div></div>
+      <div class="faq-item"><div class="faq-q">Do you guarantee winnings?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></div><div class="faq-a">No service can guarantee winnings. We provide statistically-backed predictions. Bet responsibly.</div></div>
     </div>
   </section>
-
   <footer>
-    <div class="footer-links">
-      <a href="{{BOT_LINK}}">Telegram Bot</a>
-      <a href="/">Status</a>
-      <a href="mailto:support@betmasterpro.com">Support</a>
-    </div>
+    <div class="footer-links"><a href="{{BOT_LINK}}">Telegram Bot</a><a href="/">Status</a></div>
     <div>© {{YEAR}} BetMaster Pro. All rights reserved.</div>
     <div class="disclaimer">18+ only. Gambling involves risk. Bet only what you can afford to lose.</div>
   </footer>
 </div>
 <script>
-  document.querySelectorAll('.faq-q').forEach(function(q){
-    q.addEventListener('click',function(){q.parentElement.classList.toggle('open');});
-  });
+  document.querySelectorAll('.faq-q').forEach(function(q){q.addEventListener('click',function(){q.parentElement.classList.toggle('open');});});
   function startPay(btn){btn.classList.add('loading');btn.disabled=true;return true;}
 </script>
 </body>
@@ -2112,8 +2280,7 @@ SUCCESS_TEMPLATE = r"""<!DOCTYPE html>
     background:#0a0e1a;color:#e8ecf5;min-height:100vh;display:flex;align-items:center;
     justify-content:center;padding:24px;margin:0;position:relative;overflow:hidden;}
   body::before{content:"";position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
-    width:700px;height:700px;background:radial-gradient(circle,rgba(34,197,94,.15) 0%,transparent 60%);
-    pointer-events:none;}
+    width:700px;height:700px;background:radial-gradient(circle,rgba(34,197,94,.15) 0%,transparent 60%);pointer-events:none;}
   .card{position:relative;background:rgba(255,255,255,.03);border:1px solid rgba(34,197,94,.25);
     border-radius:20px;padding:48px 36px;max-width:440px;width:100%;text-align:center;
     box-shadow:0 30px 80px -30px rgba(34,197,94,.4);}
@@ -2122,17 +2289,15 @@ SUCCESS_TEMPLATE = r"""<!DOCTYPE html>
     box-shadow:0 0 40px rgba(34,197,94,.5);animation:pop .5s cubic-bezier(.68,-.55,.27,1.55);}
   @keyframes pop{0%{transform:scale(0);opacity:0;}100%{transform:scale(1);opacity:1;}}
   .check svg{width:40px;height:40px;}
-  h1{font-size:26px;font-weight:700;margin-bottom:10px;
-    background:linear-gradient(180deg,#fff,#b8c1d6);-webkit-background-clip:text;
-    background-clip:text;-webkit-text-fill-color:transparent;}
+  h1{font-size:26px;font-weight:700;margin-bottom:10px;background:linear-gradient(180deg,#fff,#b8c1d6);
+    -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
   p{color:#8b94ab;font-size:15px;line-height:1.6;margin-bottom:28px;}
   .plan-badge{display:inline-block;padding:6px 14px;background:rgba(34,197,94,.1);
     border:1px solid rgba(34,197,94,.25);border-radius:999px;color:#4ade80;font-size:13px;
     font-weight:600;margin-bottom:20px;letter-spacing:.05em;text-transform:uppercase;}
   .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:15px 28px;
     background:linear-gradient(135deg,#22c55e,#16a34a);color:white;text-decoration:none;
-    border-radius:12px;font-weight:600;font-size:15px;box-shadow:0 10px 30px -10px rgba(34,197,94,.5);
-    transition:all .2s;width:100%;}
+    border-radius:12px;font-weight:600;font-size:15px;box-shadow:0 10px 30px -10px rgba(34,197,94,.5);transition:all .2s;width:100%;}
   .btn:hover{transform:translateY(-1px);}
   .btn svg{width:18px;height:18px;}
 </style>
@@ -2143,10 +2308,7 @@ SUCCESS_TEMPLATE = r"""<!DOCTYPE html>
   <div class="plan-badge">{{PLAN}} Activated</div>
   <h1>Welcome to VIP!</h1>
   <p>Your payment was confirmed. Return to the bot to access premium AI predictions, the N1M challenge, and personalized betslips.</p>
-  <a href="{{BOT_LINK}}" class="btn">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
-    Open Telegram Bot
-  </a>
+  <a href="{{BOT_LINK}}" class="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>Open Telegram Bot</a>
 </div>
 </body>
 </html>"""
@@ -2162,8 +2324,7 @@ FAILED_TEMPLATE = r"""<!DOCTYPE html>
     background:#0a0e1a;color:#e8ecf5;min-height:100vh;display:flex;align-items:center;
     justify-content:center;padding:24px;margin:0;position:relative;overflow:hidden;}
   body::before{content:"";position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
-    width:700px;height:700px;background:radial-gradient(circle,rgba(239,68,68,.12) 0%,transparent 60%);
-    pointer-events:none;}
+    width:700px;height:700px;background:radial-gradient(circle,rgba(239,68,68,.12) 0%,transparent 60%);pointer-events:none;}
   .card{position:relative;background:rgba(255,255,255,.03);border:1px solid rgba(239,68,68,.25);
     border-radius:20px;padding:48px 36px;max-width:440px;width:100%;text-align:center;
     box-shadow:0 30px 80px -30px rgba(239,68,68,.35);}
@@ -2179,8 +2340,7 @@ FAILED_TEMPLATE = r"""<!DOCTYPE html>
   .actions{display:flex;flex-direction:column;gap:10px;}
   .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:14px 24px;
     border-radius:12px;font-weight:600;font-size:14.5px;text-decoration:none;transition:all .2s;width:100%;}
-  .btn-primary{background:linear-gradient(135deg,#22c55e,#16a34a);color:white;
-    box-shadow:0 10px 30px -10px rgba(34,197,94,.5);}
+  .btn-primary{background:linear-gradient(135deg,#22c55e,#16a34a);color:white;}
   .btn-secondary{background:transparent;color:#8b94ab;border:1px solid rgba(255,255,255,.1);}
 </style>
 </head>
