@@ -1,13 +1,6 @@
-fastapi
-uvicorn[standard]
-requests
-python-dotenv
-sqlalchemy
-beautifulsoup4
-lxml
-numpy
-scipy
-scikit-learn
-xgboost
-naijabet-api
-understatapi
+your-project/
+├── main.py              ← the file above
+├── fetcher.py           ← from earlier message
+├── requirements.txt     ← see below
+├── render.yaml
+└── runtime.txt
