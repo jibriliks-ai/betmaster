@@ -2,11 +2,10 @@
 main.py — BetMaster Pro v3
 Professional AI betting bot with:
 - 13-market Dixon-Coles predictions + value bets
-- Real SportyBet booking codes (live API)
-- Football.com code conversion via BetRelay
+- Real SportyBet booking codes + Football.com conversion
 - 20-match accumulator with safety ranking
-- Tiered display (2 free / full VIP)
-- Bankroll advisor, N1M challenge, admin panel
+- Professional inline menu + persistent "back to menu" buttons
+- Tier-based display, bankroll advisor, N1M challenge, admin panel
 
 Data sources: ESPN, TheSportsDB, OpenFootball, The Odds API, SportyBet API.
 """
@@ -78,7 +77,7 @@ SB_HEADERS = {
 }
 
 # ──────────────────────────────────────────────
-# REPLY KEYBOARD
+# MENUS
 # ──────────────────────────────────────────────
 BTN_TODAY = "⚽ Today's Fixtures"
 BTN_N1M = "🚀 N1M Challenge"
@@ -89,6 +88,7 @@ BTN_ACCUMULATOR = "🎫 Accumulator"
 
 
 def get_main_keyboard(is_admin_user: bool = False):
+    """Persistent reply keyboard (bottom of screen)."""
     keyboard = [
         [{"text": BTN_TODAY}, {"text": BTN_N1M}],
         [{"text": BTN_EUROPE}, {"text": BTN_ASIA}],
@@ -102,6 +102,78 @@ def get_main_keyboard(is_admin_user: bool = False):
         "is_persistent": True,
         "input_field_placeholder": "Tap a button or send Team A vs Team B",
     }
+
+
+def get_inline_menu(is_admin_user: bool = False):
+    """Beautiful inline menu shown under /start and /menu."""
+    rows = [
+        [{"text": "🧠  Analyze Top 5 Matches", "callback_data": "predict_top5"}],
+        [
+            {"text": "⚽ Today's Fixtures", "callback_data": "menu_today"},
+            {"text": "🎫  Accumulator", "callback_data": "build_accumulator"},
+        ],
+        [
+            {"text": "🇪🇺 European", "callback_data": "predict_european"},
+            {"text": "🇯🇵 Asian", "callback_data": "predict_asian"},
+        ],
+        [
+            {"text": "🇺🇸 American", "callback_data": "predict_american"},
+            {"text": "🌍 National", "callback_data": "predict_national"},
+        ],
+        [{"text": "🚀  N1M Challenge — ₦1,000 → ₦1,000,000", "callback_data": "n1m_challenge"}],
+        [
+            {"text": "📊 Stats", "callback_data": "menu_stats"},
+            {"text": "🏆 Leaderboard", "callback_data": "menu_leaderboard"},
+        ],
+        [
+            {"text": "👤 Profile", "callback_data": "menu_profile"},
+            {"text": "🎁 Refer & Earn", "callback_data": "menu_refer"},
+        ],
+        [
+            {"text": "💎 Upgrade to VIP", "callback_data": "menu_upgrade"},
+            {"text": "❓ Help", "callback_data": "menu_help"},
+        ],
+    ]
+    if is_admin_user:
+        rows.append([{"text": "🔐 Admin Panel", "callback_data": "menu_admin"}])
+    return {"inline_keyboard": rows}
+
+
+def get_footer_menu_button():
+    """Small footer row with a 'Main Menu' button for message footers."""
+    return [{"text": "🏠 Main Menu", "callback_data": "menu_main"}]
+
+
+def add_footer_button(keyboard=None):
+    """Attach a '🏠 Main Menu' row to any inline keyboard (or create one)."""
+    if keyboard is None:
+        return {"inline_keyboard": [get_footer_menu_button()]}
+    if "inline_keyboard" not in keyboard:
+        keyboard = {"inline_keyboard": []}
+    # Avoid duplicates
+    for row in keyboard["inline_keyboard"]:
+        if any(b.get("callback_data") == "menu_main" for b in row):
+            return keyboard
+    keyboard["inline_keyboard"].append(get_footer_menu_button())
+    return keyboard
+
+
+def build_welcome_text(first_name, tier, daily_count, limit, is_admin_user=False):
+    admin_line = "\n🔐 *ADMIN MODE ACTIVE*\n" if is_admin_user else ""
+    return (
+        f"👋 *Welcome to BetMaster Pro, {first_name or 'friend'}!*\n"
+        f"{admin_line}\n"
+        f"🧠 *Dixon-Coles AI* · 13 markets · value bets\n"
+        f"🌍 Europe · Asia · Americas · National teams\n"
+        f"🎫 *20-match Accumulator* with real SportyBet codes\n"
+        f"🚀 *N1M Challenge* — ₦1,000 → ₦1,000,000\n"
+        f"💰 *Bankroll advisor* on every pick\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏅 *Tier:* {tier}\n"
+        f"📊 *Daily used:* {daily_count}/{limit}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👇 *Tap a button below to begin*"
+    )
 
 
 # ──────────────────────────────────────────────
@@ -883,11 +955,8 @@ def market_to_sb_selection(pick_data, event_id):
 # FOOTBALL.COM CONVERTER + DEEP LINKS
 # ──────────────────────────────────────────────
 def convert_sb_to_football(sb_code):
-    """Convert SportyBet booking code to Football.com format."""
     if not sb_code:
         return None
-
-    # BetRelay attempt
     try:
         r = requests.post("https://betrelay.com.ng/api/convert",
                           json={"from": "sportybet", "to": "football", "code": sb_code},
@@ -900,8 +969,6 @@ def convert_sb_to_football(sb_code):
                 return code
     except Exception as e:
         print(f"[BetRelay] error: {e}")
-
-    # Fallback
     try:
         r = requests.post("https://api.betconverter.app/convert",
                           json={"from": "sportybet", "to": "football.com", "code": sb_code},
@@ -910,11 +977,9 @@ def convert_sb_to_football(sb_code):
             data = r.json()
             code = data.get("code") or data.get("converted")
             if code:
-                print(f"[betconverter] {sb_code} → {code}")
                 return code
-    except Exception as e:
-        print(f"[betconverter] error: {e}")
-
+    except Exception:
+        pass
     return None
 
 
@@ -1122,26 +1187,66 @@ def send_message(chat_id, text, reply_markup=None, parse_mode=None):
 
 def set_bot_menu():
     commands = [
-        {"command": "today", "description": "Today's top fixtures"},
-        {"command": "europeanleagues", "description": "European leagues"},
-        {"command": "asianleagues", "description": "Asian leagues"},
-        {"command": "americanleagues", "description": "American leagues"},
-        {"command": "national", "description": "FIFA / national teams"},
-        {"command": "accumulator", "description": "20-match accumulator + codes"},
-        {"command": "million", "description": "N1M challenge"},
-        {"command": "stats", "description": "Your stats"},
-        {"command": "leaderboard", "description": "Top users"},
-        {"command": "refer", "description": "Refer friends"},
-        {"command": "profile", "description": "Your profile"},
-        {"command": "upgrade", "description": "Upgrade to VIP"},
-        {"command": "help", "description": "Help"},
-        {"command": "start", "description": "Start"},
+        {"command": "start", "description": "🏠 Main menu"},
+        {"command": "menu", "description": "📱 Open menu"},
+        {"command": "today", "description": "⚽ Today's fixtures"},
+        {"command": "accumulator", "description": "🎫 20-match accumulator"},
+        {"command": "million", "description": "🚀 N1M challenge"},
+        {"command": "europeanleagues", "description": "🇪🇺 European leagues"},
+        {"command": "asianleagues", "description": "🇯🇵 Asian leagues"},
+        {"command": "americanleagues", "description": "🇺🇸 American leagues"},
+        {"command": "national", "description": "🌍 National teams"},
+        {"command": "stats", "description": "📊 Your stats"},
+        {"command": "leaderboard", "description": "🏆 Leaderboard"},
+        {"command": "refer", "description": "🎁 Refer & earn"},
+        {"command": "profile", "description": "👤 Your profile"},
+        {"command": "upgrade", "description": "💎 Upgrade to VIP"},
+        {"command": "help", "description": "❓ Help"},
     ]
     try:
         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/setMyCommands",
                       json={"commands": commands}, timeout=10)
     except Exception:
         pass
+
+
+# ──────────────────────────────────────────────
+# MENU SENDER
+# ──────────────────────────────────────────────
+def send_main_menu(chat_id, user, db, edit_message_id=None):
+    """Send the beautiful main menu with inline buttons."""
+    admin = is_admin(user.user_id)
+    if admin:
+        limit = "∞"
+    elif user.is_vip:
+        limit = 10
+    else:
+        limit = 2
+    tier = "🔐 ADMIN" if admin else ("💎 VIP" if user.is_vip else "🆓 FREE")
+
+    text = build_welcome_text(user.first_name, tier, user.daily_count, limit, admin)
+    inline = get_inline_menu(admin)
+
+    if edit_message_id:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                json={
+                    "chat_id": chat_id,
+                    "message_id": edit_message_id,
+                    "text": text,
+                    "reply_markup": inline,
+                    "parse_mode": "Markdown",
+                },
+                timeout=15,
+            )
+            return
+        except Exception:
+            pass
+
+    send_message(chat_id, text, reply_markup=inline, parse_mode="Markdown")
+    # Also make sure the persistent reply keyboard is present
+    send_message(chat_id, "👇 Quick access buttons:", reply_markup=get_main_keyboard(admin))
 
 
 # ──────────────────────────────────────────────
@@ -1180,10 +1285,10 @@ def handle_region(chat_id, user_id, region, user, db, limit):
     for i, f in enumerate(fixtures[:10], 1):
         msg += f"{i}. {f['home']} vs {f['away']}\n   🏆 {f.get('league', '')} · {f.get('time', '')}\n\n"
     msg += f"({user.daily_count}/{limit}) Tap below"
-    inline_kb = {"inline_keyboard": [
+    inline_kb = add_footer_button({"inline_keyboard": [
         [{"text": "🧠 Analyze Top 5 Matches", "callback_data": f"predict_{region}"}],
         [{"text": "🎫 20-Match Accumulator", "callback_data": "build_accumulator"}],
-    ]}
+    ]})
     send_message(chat_id, msg, reply_markup=inline_kb)
 
 
@@ -1193,12 +1298,12 @@ def format_full_prediction(chat_id, fixture, show_all_markets=True):
     sa = stake_advice(p["confidence"])
 
     msg = (
-        f"⚽ {fixture['home']} vs {fixture['away']}\n"
+        f"⚽ *{fixture['home']} vs {fixture['away']}*\n"
         f"🏆 {fixture.get('league','')} | {fixture.get('time','')} WAT\n\n"
         f"📊 {p['form']}\n"
         f"📈 {p['h2h']}\n\n"
-        f"🏆 SAFEST PICK\n"
-        f"✅ {p['best_pick']}\n"
+        f"🏆 *SAFEST PICK*\n"
+        f"✅ *{p['best_pick']}*\n"
         f"   @ {p['odds']} · {p['confidence']}% conf"
     )
     if p.get("edge", 0) > 0:
@@ -1207,27 +1312,29 @@ def format_full_prediction(chat_id, fixture, show_all_markets=True):
 
     if show_all_markets:
         msg += (
-            "\n📋 ALL MARKET PROBABILITIES\n"
+            "\n📋 *ALL MARKET PROBABILITIES*\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🏠 Home Win: {mt.get('1',0):.1f}%  |  🤝 Draw: {mt.get('X',0):.1f}%  |  ✈️ Away: {mt.get('2',0):.1f}%\n"
+            f"🏠 Home: {mt.get('1',0):.1f}%  |  🤝 Draw: {mt.get('X',0):.1f}%  |  ✈️ Away: {mt.get('2',0):.1f}%\n"
             f"🎯 1X: {mt.get('1X',0):.1f}%  |  X2: {mt.get('X2',0):.1f}%  |  12: {mt.get('12',0):.1f}%\n"
             f"⚽ BTTS Y: {mt.get('BTTS Yes',0):.1f}%  |  N: {mt.get('BTTS No',0):.1f}%\n"
             f"🥅 O1.5: {mt.get('Over 1.5',0):.1f}%  |  O2.5: {mt.get('Over 2.5',0):.1f}%  |  O3.5: {mt.get('Over 3.5',0):.1f}%\n"
         )
 
     if p.get("value_bets"):
-        msg += "\n💎 VALUE BETS:\n"
+        msg += "\n💎 *VALUE BETS:*\n"
         for v in p["value_bets"][:2]:
             msg += f"   • {v['pick']} @ {v['odds']} (+{v['edge']}% edge)\n"
 
-    send_message(chat_id, msg)
+    footer = add_footer_button()
+    send_message(chat_id, msg, reply_markup=footer, parse_mode="Markdown")
 
 
 def handle_analyze_top5(chat_id, user, db, region=None):
     limit = 999999 if is_admin(user.user_id) else (10 if user.is_vip else 2)
     if not is_admin(user.user_id) and user.daily_count >= limit:
         send_message(chat_id, f"🚫 Daily limit {user.daily_count}/{limit}\n"
-                              f"Upgrade: {RENDER_URL}/subscribe?uid={user.user_id}")
+                              f"Upgrade: {RENDER_URL}/subscribe?uid={user.user_id}",
+                     reply_markup=add_footer_button())
         return
 
     if region:
@@ -1241,7 +1348,8 @@ def handle_analyze_top5(chat_id, user, db, region=None):
         fixtures = fetch_real_fixtures(days_ahead=0, limit=5)
 
     if not fixtures:
-        send_message(chat_id, f"No fixtures found.\n{BOT_LINK}")
+        send_message(chat_id, f"No fixtures found.\n{BOT_LINK}",
+                     reply_markup=add_footer_button())
         return
 
     ranked = []
@@ -1255,10 +1363,11 @@ def handle_analyze_top5(chat_id, user, db, region=None):
     visible = 5 if is_vip else 2
     hidden_count = len(ranked) - visible
 
-    send_message(chat_id, f"🧠 Analyzing Top {len(ranked)} matches...")
+    send_message(chat_id, f"🧠 Analyzing Top {len(ranked)} matches...",
+                 reply_markup=get_main_keyboard(is_admin(user.user_id)))
 
     for i, (_, f, _) in enumerate(ranked[:visible], 1):
-        send_message(chat_id, f"━━━ #{i} ━━━")
+        send_message(chat_id, f"━━━ *#{i}* ━━━", parse_mode="Markdown")
         format_full_prediction(chat_id, f, show_all_markets=is_vip)
         user.daily_count += 1
         db.commit()
@@ -1266,18 +1375,21 @@ def handle_analyze_top5(chat_id, user, db, region=None):
 
     if not is_vip and hidden_count > 0:
         send_message(chat_id, (
-            f"🔒 {hidden_count} more predictions hidden for VIP members.\n\n"
-            f"💎 VIP unlocks:\n"
+            f"🔒 *{hidden_count} more predictions hidden for VIP members.*\n\n"
+            f"💎 *VIP unlocks:*\n"
             f"✅ All 5 daily predictions (not just 2)\n"
             f"✅ 🎫 20-match Accumulator with real booking codes\n"
             f"✅ 🚀 N1M Challenge\n"
             f"✅ Full 13-market probabilities\n"
             f"✅ Bankroll advisor + value-bet alerts\n\n"
             f"👉 Upgrade: {RENDER_URL}/subscribe?uid={user.user_id}"
-        ))
+        ), reply_markup=add_footer_button({"inline_keyboard": [[
+            {"text": "💎 Upgrade to VIP Now", "url": f"{RENDER_URL}/subscribe?uid={user.user_id}"}
+        ]]}), parse_mode="Markdown")
     else:
         send_message(chat_id,
-                     f"💎 Want a 20-match accumulator?\nTap 🎫 Accumulator or /accumulator")
+                     f"💎 Want a 20-match accumulator?\nTap 🎫 Accumulator or /accumulator",
+                     reply_markup=add_footer_button())
 
 
 # ──────────────────────────────────────────────
@@ -1286,14 +1398,16 @@ def handle_analyze_top5(chat_id, user, db, region=None):
 def handle_accumulator(chat_id, user, db):
     if not user.is_vip and not is_admin(user.user_id):
         send_message(chat_id, (
-            f"🎫 20-Match Accumulator — VIP Only\n\n"
+            f"🎫 *20-Match Accumulator — VIP Only*\n\n"
             f"Build the smartest 20-match accumulator:\n"
             f"✅ Ranked by form, standings, league tier\n"
             f"✅ Real SportyBet booking code (loads in one tap)\n"
             f"✅ Football.com + BetKing deep links\n"
             f"✅ Bankroll advisor per leg\n\n"
             f"👉 Upgrade: {RENDER_URL}/subscribe?uid={user.user_id}"
-        ), reply_markup=get_main_keyboard(False))
+        ), reply_markup=add_footer_button({"inline_keyboard": [[
+            {"text": "💎 Upgrade to VIP Now", "url": f"{RENDER_URL}/subscribe?uid={user.user_id}"}
+        ]]}), parse_mode="Markdown")
         return
 
     send_message(chat_id, "🎫 Building your 20-match accumulator...\nThis takes ~30 seconds.")
@@ -1312,16 +1426,18 @@ def handle_accumulator(chat_id, user, db):
                     break
 
     if len(pool) < 8:
-        send_message(chat_id, f"Not enough fixtures ({len(pool)}). Try later.")
+        send_message(chat_id, f"Not enough fixtures ({len(pool)}). Try later.",
+                     reply_markup=add_footer_button())
         return
 
     selected = build_accumulator(pool, target_matches=20)
     if len(selected) < 5:
-        send_message(chat_id, "Could not build a safe accumulator today. Try later.")
+        send_message(chat_id, "Could not build a safe accumulator today. Try later.",
+                     reply_markup=add_footer_button())
         return
 
     msg_parts = [
-        "🎫 YOUR 20-MATCH ACCUMULATOR",
+        "🎫 *YOUR 20-MATCH ACCUMULATOR*",
         f"📅 {datetime.now().strftime('%d %b %Y')}",
         "",
     ]
@@ -1337,7 +1453,7 @@ def handle_accumulator(chat_id, user, db):
         sa = stake_advice(pick["conf"])
 
         msg_parts.append(
-            f"{i}. {f['home']} vs {f['away']}\n"
+            f"{i}. *{f['home']} vs {f['away']}*\n"
             f"   🏆 {f.get('league','')} · {f.get('time','')}\n"
             f"   ✅ {pick['pick']} @ {pick['odds']} ({pick['conf']}%)\n"
             f"   💰 Stake: {sa['percent']}%"
@@ -1358,11 +1474,10 @@ def handle_accumulator(chat_id, user, db):
     potential_win = round(total_odds * 1000, 2)
 
     msg_parts.append("")
-    msg_parts.append(f"📊 TOTAL ODDS: {total_odds}")
+    msg_parts.append(f"📊 *TOTAL ODDS:* {total_odds}")
     msg_parts.append(f"💰 N1,000 → N{potential_win:,.0f}")
     msg_parts.append("")
 
-    # Generate booking codes
     sb_code = None
     sb_url = None
     fb_code = None
@@ -1376,14 +1491,13 @@ def handle_accumulator(chat_id, user, db):
     if sb_code:
         fb_code = convert_sb_to_football(sb_code)
 
-    # Bookmaker section
-    msg_parts.append("🎟 LOAD YOUR BETSLIP INSTANTLY")
+    msg_parts.append("🎟 *LOAD YOUR BETSLIP INSTANTLY*")
     msg_parts.append("━━━━━━━━━━━━━━━━━━━━━━")
 
     if sb_code:
         msg_parts.append(
-            f"🟢 SPORTYBET\n"
-            f"   Code: {sb_code}\n"
+            f"🟢 *SPORTYBET*\n"
+            f"   Code: `{sb_code}`\n"
             f"   👉 {sb_url}"
         )
     else:
@@ -1391,26 +1505,26 @@ def handle_accumulator(chat_id, user, db):
 
     if fb_code:
         msg_parts.append(
-            f"\n🔵 FOOTBALL.COM\n"
-            f"   Code: {fb_code}\n"
+            f"\n🔵 *FOOTBALL.COM*\n"
+            f"   Code: `{fb_code}`\n"
             f"   👉 {football_com_load_url(fb_code)}"
         )
     elif sb_code:
         msg_parts.append(
-            f"\n🔵 FOOTBALL.COM\n"
-            f"   Convert your SportyBet code {sb_code} at:\n"
+            f"\n🔵 *FOOTBALL.COM*\n"
+            f"   Convert `{sb_code}` at:\n"
             f"   https://betrelay.com.ng/sportybet-to-football"
         )
     else:
         msg_parts.append(f"\n🔵 FOOTBALL.COM: https://www.football.com/en-ng/sports")
 
     msg_parts.append(
-        f"\n🟡 BETKING\n"
+        f"\n🟡 *BETKING*\n"
         f"   👉 {betking_load_url()}\n"
         f"   (Copy picks from list above)"
     )
     msg_parts.append(
-        f"\n🔴 1XBET\n"
+        f"\n🔴 *1XBET*\n"
         f"   👉 {onexbet_load_url()}"
     )
 
@@ -1419,14 +1533,35 @@ def handle_accumulator(chat_id, user, db):
 
     full_msg = "\n".join(msg_parts)
 
-    if len(full_msg) > 4000:
-        code_section = "\n".join(msg_parts[-14:])
-        body = "\n".join(msg_parts[:-14])
-        send_message(chat_id, body)
-        time.sleep(0.5)
-        full_msg = code_section
+    # Build footer with quick bookmaker buttons + main menu
+    footer_kb = {"inline_keyboard": []}
+    if sb_url:
+        footer_kb["inline_keyboard"].append([
+            {"text": "🟢 Load on SportyBet", "url": sb_url}
+        ])
+    if fb_code:
+        footer_kb["inline_keyboard"].append([
+            {"text": "🔵 Load on Football.com", "url": football_com_load_url(fb_code)}
+        ])
+    footer_kb["inline_keyboard"].append([
+        {"text": "🟡 BetKing", "url": betking_load_url()},
+        {"text": "🔴 1xBet", "url": onexbet_load_url()},
+    ])
+    add_footer_button(footer_kb)
 
-    send_message(chat_id, full_msg, reply_markup=get_main_keyboard(is_admin(user.user_id)))
+    if len(full_msg) > 3500:
+        # Split: send the picks, then a separate message with codes + buttons
+        idx = full_msg.find("🎟 *LOAD YOUR BETSLIP INSTANTLY*")
+        if idx > 0:
+            body = full_msg[:idx].strip()
+            codes = full_msg[idx:].strip()
+            send_message(chat_id, body, parse_mode="Markdown")
+            time.sleep(0.6)
+            send_message(chat_id, codes, reply_markup=footer_kb, parse_mode="Markdown")
+        else:
+            send_message(chat_id, full_msg, reply_markup=footer_kb, parse_mode="Markdown")
+    else:
+        send_message(chat_id, full_msg, reply_markup=footer_kb, parse_mode="Markdown")
 
     try:
         for sp in sendable_picks:
@@ -1454,16 +1589,16 @@ def handle_admin_panel(chat_id, user):
     finally:
         db.close()
     send_message(chat_id, (
-        f"🔐 ADMIN PANEL\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🔐 *ADMIN PANEL*\n━━━━━━━━━━━━━━━━━━━━\n\n"
         f"Users: {total_users} (VIP: {total_vip})\n"
         f"Predictions: {total_preds}\n"
         f"Brain: {len(HISTORICAL_STATS)} teams · H2H {len(H2H_CACHE)}\n"
         f"SportyBet cache: {len(SB_EVENTS_CACHE.get('data', []))}\n\n"
-        f"/admin_stats /admin_users /admin_user <uid>\n"
-        f"/admin_grant <uid> <plan> /admin_revoke <uid>\n"
-        f"/admin_broadcast <msg> /admin_channels\n\n"
-        f"Admin ID: {user.user_id}"
-    ), reply_markup=get_main_keyboard(True))
+        f"/admin_stats /admin_users /admin_user `<uid>`\n"
+        f"/admin_grant `<uid>` `<plan>` /admin_revoke `<uid>`\n"
+        f"/admin_broadcast `<msg>` /admin_channels\n\n"
+        f"Admin ID: `{user.user_id}`"
+    ), reply_markup=add_footer_button(), parse_mode="Markdown")
 
 
 def handle_admin_stats(chat_id):
@@ -1476,7 +1611,7 @@ def handle_admin_stats(chat_id):
         new_this_week = db.query(User).filter(User.created_at >= week_ago).count()
         top_pred = db.query(User).order_by(User.total_predictions.desc()).first()
         top_ref = db.query(User).order_by(User.referral_count.desc()).first()
-        msg = (f"📊 GLOBAL STATS\n\n"
+        msg = (f"📊 *GLOBAL STATS*\n\n"
                f"Users: {total_users} (VIP: {total_vip})\n"
                f"New (7d): {new_this_week}\n"
                f"Predictions: {total_preds}\n"
@@ -1485,9 +1620,9 @@ def handle_admin_stats(chat_id):
             msg += f"\nTop: {top_pred.first_name or top_pred.user_id} ({top_pred.total_predictions})"
         if top_ref:
             msg += f"\nTop ref: {top_ref.first_name or top_ref.user_id} ({top_ref.referral_count})"
-        send_message(chat_id, msg, reply_markup=get_main_keyboard(True))
+        send_message(chat_id, msg, reply_markup=add_footer_button(), parse_mode="Markdown")
     except Exception as e:
-        send_message(chat_id, f"Error: {e}")
+        send_message(chat_id, f"Error: {e}", reply_markup=add_footer_button())
     finally:
         db.close()
 
@@ -1498,20 +1633,21 @@ def handle_admin_users(chat_id, page=0):
         users = db.query(User).order_by(User.last_seen.desc())\
             .offset(page * 20).limit(20).all()
         if not users:
-            send_message(chat_id, "No users.", reply_markup=get_main_keyboard(True))
+            send_message(chat_id, "No users.", reply_markup=add_footer_button())
             return
-        msg = f"👥 USERS (page {page+1})\n\n"
+        msg = f"👥 *USERS (page {page+1})*\n\n"
         for u in users:
             tier = "💎" if u.is_vip else "🆓"
             name = (u.first_name or u.username or f"User{u.user_id}")[:20]
-            msg += f"{tier} {name} · ID:{u.user_id} · {u.daily_count}/day\n"
+            msg += f"{tier} {name} · ID:`{u.user_id}` · {u.daily_count}/day\n"
         kb = {"inline_keyboard": [[
             {"text": "⬅️ Prev", "callback_data": f"admin_users_{max(0,page-1)}"},
             {"text": "Next ➡️", "callback_data": f"admin_users_{page+1}"},
         ]]}
-        send_message(chat_id, msg, reply_markup=kb)
+        add_footer_button(kb)
+        send_message(chat_id, msg, reply_markup=kb, parse_mode="Markdown")
     except Exception as e:
-        send_message(chat_id, f"Error: {e}")
+        send_message(chat_id, f"Error: {e}", reply_markup=add_footer_button())
     finally:
         db.close()
 
@@ -1521,17 +1657,17 @@ def handle_admin_user_lookup(chat_id, uid):
     try:
         u = db.query(User).filter(User.user_id == uid).first()
         if not u:
-            send_message(chat_id, f"❌ {uid} not found.", reply_markup=get_main_keyboard(True))
+            send_message(chat_id, f"❌ {uid} not found.", reply_markup=add_footer_button())
             return
         send_message(chat_id, (
-            f"🔍 USER {uid}\n\n"
+            f"🔍 *USER {uid}*\n\n"
             f"Name: {u.first_name or '—'}\n"
             f"Username: @{u.username or '—'}\n"
             f"Tier: {'VIP' if u.is_vip else 'FREE'}\n"
             f"VIP until: {u.vip_expiry or '—'}\n"
             f"Predictions: {u.total_predictions or 0}\n"
             f"Referrals: {u.referral_count or 0}"
-        ), reply_markup=get_main_keyboard(True))
+        ), reply_markup=add_footer_button(), parse_mode="Markdown")
     except Exception as e:
         send_message(chat_id, f"Error: {e}")
     finally:
@@ -1540,19 +1676,19 @@ def handle_admin_user_lookup(chat_id, uid):
 
 def handle_admin_grant(chat_id, uid, plan):
     if plan not in ("daily", "weekly", "monthly"):
-        send_message(chat_id, f"❌ Invalid plan: {plan}", reply_markup=get_main_keyboard(True))
+        send_message(chat_id, f"❌ Invalid plan: {plan}", reply_markup=add_footer_button())
         return
     if activate_vip(uid, plan, silent=False):
-        send_message(chat_id, f"✅ Granted {plan} to {uid}", reply_markup=get_main_keyboard(True))
+        send_message(chat_id, f"✅ Granted {plan} to {uid}", reply_markup=add_footer_button())
     else:
-        send_message(chat_id, f"❌ Failed", reply_markup=get_main_keyboard(True))
+        send_message(chat_id, f"❌ Failed", reply_markup=add_footer_button())
 
 
 def handle_admin_revoke(chat_id, uid):
     if revoke_vip(uid):
-        send_message(chat_id, f"✅ Revoked {uid}", reply_markup=get_main_keyboard(True))
+        send_message(chat_id, f"✅ Revoked {uid}", reply_markup=add_footer_button())
     else:
-        send_message(chat_id, f"❌ Failed", reply_markup=get_main_keyboard(True))
+        send_message(chat_id, f"❌ Failed", reply_markup=add_footer_button())
 
 
 def handle_admin_broadcast(chat_id, message):
@@ -1565,21 +1701,21 @@ def handle_admin_broadcast(chat_id, message):
     sent = 0
     for u in users:
         try:
-            r = send_message(u.user_id, f"📢 ANNOUNCEMENT\n\n{message}")
+            r = send_message(u.user_id, f"📢 *ANNOUNCEMENT*\n\n{message}", parse_mode="Markdown")
             if r and r.get("ok"):
                 sent += 1
             time.sleep(0.05)
         except Exception:
             pass
-    send_message(chat_id, f"✅ Sent to {sent}/{len(users)}", reply_markup=get_main_keyboard(True))
+    send_message(chat_id, f"✅ Sent to {sent}/{len(users)}", reply_markup=add_footer_button())
 
 
 def handle_admin_test_channel(chat_id):
     if not CHANNEL_ID:
-        send_message(chat_id, "❌ CHANNEL_ID not set.", reply_markup=get_main_keyboard(True))
+        send_message(chat_id, "❌ CHANNEL_ID not set.", reply_markup=add_footer_button())
         return
     r = send_message(CHANNEL_ID, f"🧪 Test\n{BOT_LINK}")
-    send_message(chat_id, f"Sent: {bool(r and r.get('ok'))}", reply_markup=get_main_keyboard(True))
+    send_message(chat_id, f"Sent: {bool(r and r.get('ok'))}", reply_markup=add_footer_button())
 
 
 # ──────────────────────────────────────────────
@@ -1589,8 +1725,11 @@ def handle_n1m(chat_id, user, db):
     kb = get_main_keyboard(is_admin(user.user_id))
     if not user.is_vip and not is_admin(user.user_id):
         send_message(chat_id,
-                     f"🚀 N1M Challenge — VIP Only\n\n👉 {RENDER_URL}/subscribe?uid={user.user_id}",
-                     reply_markup=kb)
+                     f"🚀 *N1M Challenge — VIP Only*\n\n👉 {RENDER_URL}/subscribe?uid={user.user_id}",
+                     reply_markup=add_footer_button({"inline_keyboard": [[
+                         {"text": "💎 Upgrade to VIP Now",
+                          "url": f"{RENDER_URL}/subscribe?uid={user.user_id}"}
+                     ]]}), parse_mode="Markdown")
         return
     send_message(chat_id, "🚀 Building your N1M slip...", reply_markup=kb)
     pool = sb_fetch_events(timeline_hours=72) or fetch_real_fixtures(days_ahead=0, limit=40)
@@ -1604,7 +1743,8 @@ def handle_n1m(chat_id, user, db):
             if len(pool) >= 20:
                 break
     if len(pool) < 8:
-        send_message(chat_id, f"Not enough fixtures ({len(pool)}).", reply_markup=kb)
+        send_message(chat_id, f"Not enough fixtures ({len(pool)}).",
+                     reply_markup=add_footer_button())
         return
 
     selected = build_accumulator(pool, target_matches=20)
@@ -1623,13 +1763,13 @@ def handle_n1m(chat_id, user, db):
         user.n1m_best = pot_win
     db.commit()
 
-    msg = (f"🚀 N1M CHALLENGE\n\n"
+    msg = (f"🚀 *N1M CHALLENGE*\n\n"
            f"💰 Stake: N1,000\n🎯 Target: N1,000,000\n"
            f"📊 Total odds: {total_odds}\n💵 Potential: N{pot_win:,.0f}\n\n")
     for i, p in enumerate(picks[:20], 1):
         msg += f"{i}. {p['match']}\n   {p['pick']} @ {p['odds']} ({p['conf']}%)\n"
-    msg += f"\n⚠️ High-risk. Bet responsibly.\n{BOT_LINK}"
-    send_message(chat_id, msg, reply_markup=kb)
+    msg += f"\n⚠️ High-risk. Bet responsibly."
+    send_message(chat_id, msg, reply_markup=add_footer_button(), parse_mode="Markdown")
 
 
 # ──────────────────────────────────────────────
@@ -1652,6 +1792,129 @@ def map_button_to_command(text, admin):
     if admin and "admin" in low and "panel" in low:
         return "/admin"
     return None
+
+
+# ──────────────────────────────────────────────
+# CALLBACK HANDLER (menu actions)
+# ──────────────────────────────────────────────
+def handle_menu_callback(chat_id, user, db, action):
+    """Route menu_* inline button callbacks."""
+    if action == "menu_main":
+        send_main_menu(chat_id, user, db)
+    elif action == "menu_today":
+        # Reuse today logic
+        if not is_admin(user.user_id) and user.daily_count >= (10 if user.is_vip else 2):
+            send_message(chat_id, f"🚫 Daily limit reached.",
+                         reply_markup=add_footer_button())
+            return
+        send_message(chat_id, "🔎 Scanning today's fixtures...",
+                     reply_markup=get_main_keyboard(is_admin(user.user_id)))
+        fixtures = fetch_real_fixtures(days_ahead=0, limit=10)
+        if not fixtures:
+            send_message(chat_id, f"No fixtures today.\n{BOT_LINK}",
+                         reply_markup=add_footer_button())
+            return
+        scored = [(f, score_fixture_for_user(f, user)) for f in fixtures]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        fixtures = [f for f, _ in scored][:10]
+        msg_txt = f"⚽ *TOP FIXTURES — {fixtures[0].get('date', 'Today')}*\n\n"
+        for i, f in enumerate(fixtures, 1):
+            star = "⭐ " if score_fixture_for_user(f, user) >= 50 else ""
+            msg_txt += (f"{i}. {star}{f['home']} vs {f['away']}\n"
+                        f"   🏆 {f.get('league','')} · {f.get('time','')}\n\n")
+        inline_kb = add_footer_button({"inline_keyboard": [
+            [{"text": "🧠 Analyze Top 5 Matches", "callback_data": "predict_top5"}],
+            [{"text": "🎫 20-Match Accumulator", "callback_data": "build_accumulator"}],
+        ]})
+        send_message(chat_id, msg_txt, reply_markup=inline_kb, parse_mode="Markdown")
+    elif action == "menu_stats":
+        stats = get_user_stats(db, user.user_id)
+        admin_line = "\n🔐 ADMIN" if is_admin(user.user_id) else ""
+        send_message(chat_id, (
+            f"📊 *Your Stats*{admin_line}\n\n"
+            f"🔥 Streak: {stats['streak']} (best {stats['best_streak']})\n"
+            f"🎯 Predictions: {stats['total']}\n"
+            f"✅ {stats['wins']}W / ❌ {stats['losses']}L\n"
+            f"📈 Win rate: {stats['win_rate']}%\n\n"
+            f"💰 Bankroll: N{stats['bankroll']:.0f}\n"
+            f"🎁 Referrals: {stats['referrals']}\n"
+            f"🚀 N1M: N{stats['n1m_bankroll']:.0f}"
+        ), reply_markup=add_footer_button(), parse_mode="Markdown")
+    elif action == "menu_leaderboard":
+        try:
+            top = db.query(User).filter(User.total_predictions >= 5)\
+                .order_by(User.total_wins.desc()).limit(10).all()
+        except Exception:
+            top = []
+        msg_txt = "🏆 *Leaderboard — Top Predictors*\n\n"
+        if not top:
+            msg_txt += "No stats yet. Be the first!"
+        else:
+            for i, u in enumerate(top, 1):
+                medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
+                name = u.first_name or u.username or f"User{u.user_id}"
+                rate = round(u.total_wins / max(u.total_predictions, 1) * 100, 0)
+                msg_txt += f"{medal} {name} — {u.total_wins}W · {rate:.0f}%\n"
+        send_message(chat_id, msg_txt, reply_markup=add_footer_button(), parse_mode="Markdown")
+    elif action == "menu_profile":
+        stats = get_user_stats(db, user.user_id)
+        tier = "🔐 ADMIN" if is_admin(user.user_id) else ("💎 VIP" if user.is_vip else "🆓 FREE")
+        exp = user.vip_expiry if user.is_vip else "—"
+        limit = 999 if is_admin(user.user_id) else (10 if user.is_vip else 2)
+        send_message(chat_id, (
+            f"👤 *Your Profile*\n\n"
+            f"Name: {user.first_name or user.username or 'Anon'}\n"
+            f"Tier: {tier}\n"
+            f"VIP until: {exp}\n"
+            f"Daily used: {user.daily_count}/{limit}\n\n"
+            f"📊 Streak {stats['streak']} · {stats['win_rate']}% win rate\n"
+            f"⭐ Fav leagues: {user.fav_leagues or 'None yet'}"
+        ), reply_markup=add_footer_button(), parse_mode="Markdown")
+    elif action == "menu_refer":
+        ref_link = f"https://t.me/Betmasterpro_bot?start=ref_{user.referral_code}"
+        send_message(chat_id, (
+            f"🎁 *Refer Friends, Earn VIP*\n\n"
+            f"*Your link:*\n`{ref_link}`\n\n"
+            f"✅ You get 7 free VIP days per paying referral\n"
+            f"✅ They get 20% off their first month\n\n"
+            f"Referrals so far: {user.referral_count or 0}"
+        ), reply_markup=add_footer_button({"inline_keyboard": [[
+            {"text": "📤 Share Link",
+             "url": f"https://t.me/share/url?url={ref_link}&text=Join%20BetMaster%20Pro"}
+        ]]}), parse_mode="Markdown")
+    elif action == "menu_upgrade":
+        if is_admin(user.user_id):
+            send_message(chat_id, "🔐 ADMIN — full access already.",
+                         reply_markup=add_footer_button())
+            return
+        send_message(chat_id, (
+            f"💎 *VIP Benefits*\n\n"
+            f"✅ 10 predictions/day (vs FREE 2)\n"
+            f"✅ 🎫 20-match Accumulator with real SportyBet + Football.com codes\n"
+            f"✅ 🚀 N1M Challenge\n"
+            f"✅ Full 13-market probabilities\n"
+            f"✅ Value-bet alerts + bankroll advisor\n\n"
+            f"*Plans:*\n"
+            f"• Daily — N500\n• Weekly — N2,000\n• Monthly — N5,000\n"
+        ), reply_markup=add_footer_button({"inline_keyboard": [
+            [{"text": "💳 Pay Now — View Plans",
+              "url": f"{RENDER_URL}/subscribe?uid={user.user_id}"}]
+        ]}), parse_mode="Markdown")
+    elif action == "menu_help":
+        admin_line = ("\n🔐 *Admin:*\n/admin /admin_stats /admin_users\n"
+                      "/admin_grant /admin_revoke /admin_broadcast\n") if is_admin(user.user_id) else ""
+        send_message(chat_id, (
+            f"📖 *BetMaster Pro Help*\n\n"
+            f"*VIP:* /accumulator /million\n"
+            f"*Fixtures:* /today /europeanleagues /asianleagues /americanleagues /national\n"
+            f"*Account:* /stats /leaderboard /refer /profile /upgrade\n"
+            f"{admin_line}\n"
+            f"FREE 2/day · VIP 10/day\n{BOT_LINK}"
+        ), reply_markup=add_footer_button(), parse_mode="Markdown")
+    elif action == "menu_admin" and is_admin(user.user_id):
+        handle_admin_panel(chat_id, user)
+    else:
+        send_main_menu(chat_id, user, db)
 
 
 # ──────────────────────────────────────────────
@@ -1685,6 +1948,12 @@ def process_update(upd):
                 user2 = get_user(db2, from_id,
                                  cq["from"].get("username", ""),
                                  cq["from"].get("first_name", ""))
+
+                # Menu callbacks first
+                if data.startswith("menu_"):
+                    handle_menu_callback(chat_id, user2, db2, data)
+                    return
+
                 if data.startswith("predict_"):
                     region = data.replace("predict_", "")
                     handle_analyze_top5(chat_id, user2, db2, region=region)
@@ -1723,7 +1992,7 @@ def process_update(upd):
             FREE, VIP = 2, 10
             cur = 999999 if admin else (VIP if user.is_vip else FREE)
 
-            # Admin
+            # Admin routing
             if low.startswith("/admin") and admin:
                 parts = text.split(maxsplit=2)
                 subcmd = parts[0].lower()
@@ -1735,28 +2004,37 @@ def process_update(upd):
                     handle_admin_users(chat_id, 0)
                 elif subcmd == "/admin_user" and len(parts) >= 2:
                     try: handle_admin_user_lookup(chat_id, int(parts[1]))
-                    except Exception: send_message(chat_id, "Usage: /admin_user <uid>", reply_markup=main_kb)
+                    except Exception: send_message(chat_id, "Usage: /admin_user `<uid>`",
+                                                  reply_markup=add_footer_button(),
+                                                  parse_mode="Markdown")
                 elif subcmd == "/admin_grant" and len(parts) >= 3:
                     try: handle_admin_grant(chat_id, int(parts[1]), parts[2].lower())
-                    except Exception: send_message(chat_id, "Usage: /admin_grant <uid> <plan>", reply_markup=main_kb)
+                    except Exception: send_message(chat_id, "Usage: /admin_grant `<uid> <plan>`",
+                                                  reply_markup=add_footer_button(),
+                                                  parse_mode="Markdown")
                 elif subcmd == "/admin_revoke" and len(parts) >= 2:
                     try: handle_admin_revoke(chat_id, int(parts[1]))
-                    except Exception: send_message(chat_id, "Usage: /admin_revoke <uid>", reply_markup=main_kb)
+                    except Exception: send_message(chat_id, "Usage: /admin_revoke `<uid>`",
+                                                  reply_markup=add_footer_button(),
+                                                  parse_mode="Markdown")
                 elif subcmd == "/admin_broadcast":
                     bmsg = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else ""
                     if bmsg:
                         threading.Thread(target=handle_admin_broadcast,
                                          args=(chat_id, bmsg), daemon=True).start()
                     else:
-                        send_message(chat_id, "Usage: /admin_broadcast <msg>", reply_markup=main_kb)
+                        send_message(chat_id, "Usage: /admin_broadcast `<msg>`",
+                                     reply_markup=add_footer_button(), parse_mode="Markdown")
                 elif subcmd == "/admin_channels":
                     handle_admin_test_channel(chat_id)
                 else:
-                    send_message(chat_id, "Unknown admin cmd. Use /admin", reply_markup=main_kb)
+                    send_message(chat_id, "Unknown admin cmd. Use /admin",
+                                 reply_markup=add_footer_button())
                 return
 
             if low.startswith("/admin"):
-                send_message(chat_id, "⛔ Admin access required.", reply_markup=main_kb)
+                send_message(chat_id, "⛔ Admin access required.",
+                             reply_markup=add_footer_button())
                 return
 
             if low.startswith("/start") and "ref_" in low:
@@ -1768,36 +2046,11 @@ def process_update(upd):
                 except Exception:
                     pass
 
-            if low.startswith("/start"):
-                tier = "🔐 ADMIN" if admin else ("💎 VIP" if user.is_vip else "🆓 FREE")
-                admin_line = "\n🔐 ADMIN — tap 🔐 Admin Panel.\n" if admin else ""
-                send_message(chat_id, (
-                    f"👋 Welcome to BetMaster Pro, {first_name or 'friend'}!\n\n"
-                    f"🧠 Dixon-Coles AI · 13 markets\n"
-                    f"🌍 Europe · Asia · Americas · National\n"
-                    f"🎫 Real SportyBet + Football.com codes\n"
-                    f"🚀 N1M Challenge\n"
-                    f"{admin_line}\n"
-                    f"Tier: {tier}\n"
-                    f"Limit: {'∞' if admin else user.daily_count}/{cur if not admin else '∞'}\n\n"
-                    f"👇 Use the menu below\n\n"
-                    f"VIP: /accumulator /million\n"
-                    f"FREE: /today /europeanleagues /asianleagues /americanleagues /national\n"
-                    f"Account: /stats /leaderboard /refer /profile /upgrade /help\n\n"
-                    f"Or send: Team A vs Team B\n\n{BOT_LINK}"
-                ), reply_markup=main_kb)
+            if low.startswith("/start") or low.startswith("/menu"):
+                send_main_menu(chat_id, user, db)
 
             elif low.startswith("/help"):
-                admin_line = ("\n🔐 Admin:\n/admin /admin_stats /admin_users\n"
-                              "/admin_grant /admin_revoke /admin_broadcast\n") if admin else ""
-                send_message(chat_id, (
-                    f"📖 Help\n\n"
-                    f"VIP: /accumulator /million\n"
-                    f"Fixtures: /today /europeanleagues /asianleagues /americanleagues /national\n"
-                    f"Account: /stats /leaderboard /refer /profile /upgrade\n"
-                    f"{admin_line}\n"
-                    f"FREE {FREE}/day · VIP {VIP}/day\n{BOT_LINK}"
-                ), reply_markup=main_kb)
+                handle_menu_callback(chat_id, user, db, "menu_help")
 
             elif low.startswith("/europeanleagues"):
                 handle_region(chat_id, user_id, "european", user, db, cur)
@@ -1815,119 +2068,43 @@ def process_update(upd):
                 handle_n1m(chat_id, user, db)
 
             elif low.startswith("/today"):
-                if not admin and user.daily_count >= cur:
-                    send_message(chat_id, f"🚫 Limit {user.daily_count}/{cur}\n"
-                                          f"{RENDER_URL}/subscribe?uid={user_id}",
-                                 reply_markup=main_kb)
-                    return
-                send_message(chat_id, "🔎 Scanning today's fixtures...", reply_markup=main_kb)
-                fixtures = fetch_real_fixtures(days_ahead=0, limit=10)
-                if not fixtures:
-                    send_message(chat_id, f"No fixtures today.\n{BOT_LINK}", reply_markup=main_kb)
-                    return
-                scored = [(f, score_fixture_for_user(f, user)) for f in fixtures]
-                scored.sort(key=lambda x: x[1], reverse=True)
-                fixtures = [f for f, _ in scored][:10]
-                msg_txt = f"⚽ TOP FIXTURES — {fixtures[0].get('date', 'Today')}\n\n"
-                for i, f in enumerate(fixtures, 1):
-                    star = "⭐ " if score_fixture_for_user(f, user) >= 50 else ""
-                    msg_txt += f"{i}. {star}{f['home']} vs {f['away']}\n   🏆 {f.get('league','')} · {f.get('time','')}\n\n"
-                msg_txt += f"({user.daily_count}/{cur if not admin else '∞'}) Tap below"
-                inline_kb = {"inline_keyboard": [
-                    [{"text": "🧠 Analyze Top 5 Matches", "callback_data": "predict_top5"}],
-                    [{"text": "🎫 20-Match Accumulator", "callback_data": "build_accumulator"}],
-                ]}
-                send_message(chat_id, msg_txt, reply_markup=inline_kb)
+                handle_menu_callback(chat_id, user, db, "menu_today")
 
             elif low.startswith("/betslip"):
                 if not user.is_vip and not admin:
                     send_message(chat_id, f"💎 VIP only.\n{RENDER_URL}/subscribe?uid={user_id}",
-                                 reply_markup=main_kb)
+                                 reply_markup=add_footer_button())
                     return
                 handle_accumulator(chat_id, user, db)
 
             elif low.startswith("/stats"):
-                stats = get_user_stats(db, user_id)
-                admin_line = "\n🔐 ADMIN" if admin else ""
-                send_message(chat_id, (
-                    f"📊 Stats{admin_line}\n\n"
-                    f"🔥 Streak: {stats['streak']} (best {stats['best_streak']})\n"
-                    f"🎯 Predictions: {stats['total']}\n"
-                    f"✅ {stats['wins']}W / ❌ {stats['losses']}L\n"
-                    f"📈 Win rate: {stats['win_rate']}%\n\n"
-                    f"💰 Bankroll: N{stats['bankroll']:.0f}\n"
-                    f"🎁 Referrals: {stats['referrals']}\n"
-                    f"🚀 N1M: N{stats['n1m_bankroll']:.0f}"
-                ), reply_markup=main_kb)
+                handle_menu_callback(chat_id, user, db, "menu_stats")
 
             elif low.startswith("/leaderboard"):
-                try:
-                    top = db.query(User).filter(User.total_predictions >= 5)\
-                        .order_by(User.total_wins.desc()).limit(10).all()
-                except Exception:
-                    top = []
-                msg_txt = "🏆 Leaderboard\n\n"
-                if not top:
-                    msg_txt += "No stats yet."
-                else:
-                    for i, u in enumerate(top, 1):
-                        medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
-                        name = u.first_name or u.username or f"User{u.user_id}"
-                        rate = round(u.total_wins / max(u.total_predictions, 1) * 100, 0)
-                        msg_txt += f"{medal} {name} — {u.total_wins}W · {rate:.0f}%\n"
-                send_message(chat_id, msg_txt, reply_markup=main_kb)
+                handle_menu_callback(chat_id, user, db, "menu_leaderboard")
 
             elif low.startswith("/refer"):
-                ref_link = f"https://t.me/Betmasterpro_bot?start=ref_{user.referral_code}"
-                send_message(chat_id, (
-                    f"🎁 Refer Friends\n\n"
-                    f"Link: {ref_link}\n\n"
-                    f"You get 7 free VIP days per paying referral.\n"
-                    f"Referrals: {user.referral_count or 0}"
-                ), reply_markup=main_kb)
+                handle_menu_callback(chat_id, user, db, "menu_refer")
 
             elif low.startswith("/profile"):
-                stats = get_user_stats(db, user_id)
-                tier = "🔐 ADMIN" if admin else ("💎 VIP" if user.is_vip else "🆓 FREE")
-                exp = user.vip_expiry if user.is_vip else "—"
-                send_message(chat_id, (
-                    f"👤 Profile\n\n"
-                    f"Name: {first_name or username or 'Anon'}\n"
-                    f"Tier: {tier}\n"
-                    f"VIP until: {exp}\n"
-                    f"Daily used: {user.daily_count}/{cur if not admin else '∞'}\n\n"
-                    f"📊 Streak {stats['streak']} · {stats['win_rate']}% win rate\n"
-                    f"⭐ Fav: {user.fav_leagues or 'None'}"
-                ), reply_markup=main_kb)
+                handle_menu_callback(chat_id, user, db, "menu_profile")
 
             elif low.startswith("/upgrade"):
-                if admin:
-                    send_message(chat_id, "🔐 ADMIN — full access.", reply_markup=main_kb)
-                    return
-                send_message(chat_id, (
-                    f"💎 VIP Benefits\n\n"
-                    f"✅ 10 predictions/day (vs FREE 2)\n"
-                    f"✅ 🎫 20-match Accumulator with real SportyBet + Football.com codes\n"
-                    f"✅ 🚀 N1M Challenge\n"
-                    f"✅ Full 13-market probabilities\n"
-                    f"✅ Value-bet alerts + bankroll advisor\n\n"
-                    f"Plans:\n"
-                    f"• Daily — N500\n• Weekly — N2,000\n• Monthly — N5,000\n\n"
-                    f"👉 {RENDER_URL}/subscribe?uid={user_id}"
-                ), reply_markup=main_kb)
+                handle_menu_callback(chat_id, user, db, "menu_upgrade")
 
             elif " vs " in low and 5 < len(text) < 100:
                 if not admin and user.daily_count >= cur:
                     send_message(chat_id, f"🚫 Limit {user.daily_count}/{cur}\n"
                                           f"{RENDER_URL}/subscribe?uid={user_id}",
-                                 reply_markup=main_kb)
+                                 reply_markup=add_footer_button())
                     return
                 try:
                     parts = re.split(r"\s+vs\s+", text, flags=re.IGNORECASE)
                     home = parts[0].strip().title()
                     away = parts[1].strip().title()
                 except Exception:
-                    send_message(chat_id, "Format: Team A vs Team B", reply_markup=main_kb)
+                    send_message(chat_id, "Format: Team A vs Team B",
+                                 reply_markup=add_footer_button())
                     return
                 all_f = fetch_real_fixtures(days_ahead=0, limit=100)
                 matched = next((f for f in all_f
@@ -1948,7 +2125,8 @@ def process_update(upd):
                 db.commit()
 
             else:
-                send_message(chat_id, f"Unknown command. /help\n{BOT_LINK}", reply_markup=main_kb)
+                send_message(chat_id, f"Unknown command. /help\n{BOT_LINK}",
+                             reply_markup=add_footer_button())
 
         except Exception as e:
             print(f"Handler error: {e}")
@@ -1989,18 +2167,18 @@ def channel_scheduler():
                                 continue
                         ranked.sort(key=lambda x: x[0], reverse=True)
 
-                        msg = f"🎯 TOP 2 FREE PICKS — {today_str}\n\n"
+                        msg = f"🎯 *TOP 2 FREE PICKS — {today_str}*\n\n"
                         for i, (_, f, p) in enumerate(ranked[:2], 1):
-                            msg += (f"{i}. {f['home']} vs {f['away']}\n"
+                            msg += (f"{i}. *{f['home']} vs {f['away']}*\n"
                                     f"   🏆 {f.get('league','')} · {f.get('time','')}\n"
                                     f"   ✅ {p['best_pick']} @ {p['odds']} ({p['confidence']}%)\n\n")
                         msg += (
-                            f"🔒 18 more picks + 20-match accumulator with "
+                            f"🔒 *18 more picks* + 20-match accumulator with "
                             f"REAL SportyBet + Football.com codes are VIP-only.\n\n"
                             f"👉 Click to upgrade and see full betslip: {BOT_LINK}\n\n"
                             f"{BOT_HANDLE}"
                         )
-                        send_message(CHANNEL_ID, msg)
+                        send_message(CHANNEL_ID, msg, parse_mode="Markdown")
                 except Exception as e:
                     print(f"8AM error: {e}")
                 posted_today.add(f"{today_str}-8am")
@@ -2042,7 +2220,8 @@ async def home():
         "admins": len(ADMIN_IDS),
         "features": ["13 markets", "value bets", "bankroll advisor",
                      "20-match accumulator", "SportyBet codes",
-                     "Football.com codes", "N1M challenge", "admin panel"],
+                     "Football.com codes", "N1M challenge", "admin panel",
+                     "professional inline menu", "persistent back-to-menu"],
         "brain": f"{len(HISTORICAL_STATS)} teams",
         "sb_cache": len(SB_EVENTS_CACHE.get("data", [])),
     }
@@ -2075,14 +2254,6 @@ async def test_sportybet():
     return {"count": len(events), "sample": events[:3] if events else []}
 
 
-@app.get("/test-converter")
-async def test_converter(code: str = ""):
-    if not code:
-        return {"error": "Provide ?code=ABC123"}
-    result = convert_sb_to_football(code)
-    return {"input": code, "football_code": result}
-
-
 @app.get("/admin/whoami")
 async def admin_whoami(uid: str = ""):
     try:
@@ -2092,7 +2263,7 @@ async def admin_whoami(uid: str = ""):
     return {"uid": uid_int, "is_admin": is_admin(uid_int)}
 
 
-# Payment routes
+# ── Payment routes ──
 @app.get("/subscribe", response_class=HTMLResponse)
 async def subscribe(request: Request):
     uid = request.query_params.get("uid", "")
