@@ -1,18 +1,7 @@
 """
-main.py — BetMaster Pro v6
-VIP-gated markets + proof page + league gating + team stats + interactive buttons.
-
-Features:
-- Dixon-Coles 13-market predictions with value bets
-- Real SportyBet booking codes + Football.com conversion
-- 20-match accumulator + N1M challenge + Betslip 500K
-- Preference-based personalization (3 regions max)
-- /stats Arsenal for team-level stats
-- H2H / Form / Odds Compare buttons on every prediction
-- VIP-only: Correct Score, Handicap, Betslip codes
-- Free: EPL, La Liga, Serie A, Bundesliga, Ligue 1, UCL
-- VIP: All Asian/American/African leagues too
-- Proof page on /subscribe
+main.py — BetMaster Pro v7
+VIP-gated markets + proof page + league gating + team stats + interactive buttons
++ FULL USER PERSISTENCE (welcome back, preferred plan memory, /remember, /debug-db).
 """
 
 import os, time, threading, requests, json, traceback, random, hashlib, csv, io, re, math, html
@@ -189,6 +178,8 @@ class User(Base):
     n1m_bankroll = Column(Float, default=0.0)
     n1m_best = Column(Float, default=0.0)
     bankroll = Column(Float, default=10000.0)
+    preferred_plan = Column(String, default="")
+    total_visits = Column(Integer, default=0)
     is_banned = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_seen = Column(DateTime, default=datetime.utcnow)
@@ -229,6 +220,30 @@ class Proof(Base):
 try: Base.metadata.create_all(bind=engine)
 except Exception as e: print(f"DB init: {e}")
 
+def ensure_schema():
+    """Lightweight migration — adds missing columns to existing tables."""
+    from sqlalchemy import text, inspect
+    try:
+        insp = inspect(engine)
+        existing = {c["name"] for c in insp.get_columns("users")}
+        migrations = [
+            ("preferred_plan", "VARCHAR DEFAULT ''"),
+            ("total_visits", "INTEGER DEFAULT 0"),
+        ]
+        for col_name, col_def in migrations:
+            if col_name not in existing:
+                try:
+                    with engine.connect() as conn:
+                        conn.execute(text(f"ALTER TABLE users ADD COLUMN {col_name} {col_def}"))
+                        conn.commit()
+                    print(f"[migrate] Added users.{col_name}")
+                except Exception as e:
+                    print(f"[migrate] {col_name}: {e}")
+    except Exception as e:
+        print(f"[migrate] {e}")
+
+ensure_schema()
+
 # ── DB HELPERS ──
 def get_user(db, user_id, username="", first_name=""):
     today_str = str(date.today())
@@ -238,13 +253,17 @@ def get_user(db, user_id, username="", first_name=""):
             ref_code = hashlib.md5(f"BM{user_id}{time.time()}".encode()).hexdigest()[:8].upper()
             user = User(user_id=user_id, username=username, first_name=first_name,
                         last_reset=today_str, daily_count=0, referral_code=ref_code,
-                        last_seen=datetime.utcnow())
+                        last_seen=datetime.utcnow(), total_visits=1)
             db.add(user); db.commit(); db.refresh(user); return user
         if user.last_reset != today_str:
             user.daily_count = 0; user.last_reset = today_str; db.commit()
         if user.is_vip and user.vip_expiry and user.vip_expiry < today_str:
             user.is_vip = False; user.vip_plan = ""; db.commit()
         user.last_seen = datetime.utcnow()
+        try:
+            user.total_visits = (user.total_visits or 0) + 1
+        except Exception:
+            pass
         if username and user.username != username: user.username = username
         if first_name and user.first_name != first_name: user.first_name = first_name
         db.commit(); return user
@@ -257,7 +276,9 @@ def get_user(db, user_id, username="", first_name=""):
             preferred_regions=""; preferences_set=False; notified_today=""
             daily_notify_enabled=True
             n1m_bankroll=0.0; n1m_best=0.0; bankroll=10000.0; is_banned=False
+            preferred_plan=""; total_visits=0
             first_name=first_name; username=username
+            created_at=datetime.utcnow(); last_seen=datetime.utcnow()
         return Dummy()
 
 def get_user_prefs(user):
@@ -272,6 +293,7 @@ def activate_vip(uid, plan, silent=False):
         expiry = date.today() + timedelta(days=days)
         user.is_vip = True; user.vip_expiry = str(expiry)
         user.vip_plan = plan; user.daily_count = 0
+        user.preferred_plan = plan
         db.commit()
         if not silent:
             send_message(int(uid), (
@@ -1093,6 +1115,7 @@ def set_bot_menu():
     cmds = [
         {"command":"start","description":"🏠 Main menu"},
         {"command":"menu","description":"📱 Open menu"},
+        {"command":"remember","description":"🧠 What I remember about you"},
         {"command":"preferences","description":"⚙️ Set preferences"},
         {"command":"today","description":"⚽ Today's fixtures"},
         {"command":"accumulator","description":"🎫 20-match accumulator"},
@@ -1228,6 +1251,98 @@ def send_main_menu(chat_id, user, db):
     send_message(chat_id, text, reply_markup=get_inline_menu(admin), parse_mode="Markdown")
     send_message(chat_id, "⚡ Quick access buttons below", reply_markup=get_main_keyboard(admin))
 
+def send_start_message(chat_id, user, db):
+    """Send /start with welcome-back detection + preference flow."""
+    admin = is_admin(user.user_id)
+    visits = getattr(user, "total_visits", 0) or 0
+    has_history = (
+        user.preferences_set or
+        (user.total_predictions or 0) > 0 or
+        user.is_vip or
+        visits >= 2
+    )
+    if has_history and not admin:
+        tier = "💎 VIP" if user.is_vip else "🆓 FREE"
+        prefs = get_user_prefs(user)
+        pref_labels = " · ".join(REGIONS[k]["label"] for k in prefs) if prefs else "Not set"
+        last_seen_txt = "—"
+        try:
+            if user.last_seen:
+                days_ago = (datetime.utcnow() - user.last_seen).days
+                if days_ago == 0: last_seen_txt = "Today"
+                elif days_ago == 1: last_seen_txt = "Yesterday"
+                else: last_seen_txt = f"{days_ago} days ago"
+        except Exception: pass
+        vip_line = ""
+        if user.is_vip and user.vip_expiry:
+            vip_line = f"💎 VIP active until *{user.vip_expiry}*\n"
+        msg = (
+            f"👋 *Welcome back, {user.first_name or user.username or 'champion'}!*\n\n"
+            f"I remembered you. 🧠\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🏅 Tier: *{tier}*\n"
+            f"{vip_line}"
+            f"🎯 Preferences: {pref_labels}\n"
+            f"📊 Predictions received: *{user.total_predictions or 0}*\n"
+            f"🔥 Current streak: *{user.streak or 0}*\n"
+            f"👁 Last visit: {last_seen_txt}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👇 *Ready to find today's winners?*"
+        )
+        send_message(chat_id, msg, reply_markup=get_inline_menu(admin), parse_mode="Markdown")
+        send_message(chat_id, "⚡ Quick access buttons below", reply_markup=get_main_keyboard(admin))
+        return
+    if not user.preferences_set and not admin:
+        send_message(chat_id, (
+            f"🏆 *WELCOME TO BETMASTER PRO!*\n\n"
+            f"You're joining *5,000+ winners* who use AI to dominate the bookies.\n\n"
+            f"🧠 Dixon-Coles AI engine · 13 markets\n"
+            f"📊 Team stats · H2H · Odds compare\n"
+            f"🌍 Africa · Asia · Europe · America · National\n"
+            f"🎯 Correct Score + Handicap markets (VIP)\n"
+            f"🎫 20-match Betslip with real booking codes (VIP)\n"
+            f"🚀 N1M Challenge — ₦1,000 → ₦1,000,000\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"*First, let's set up your preferences.*\n"
+            f"Pick up to *3 regions* you want predictions from."
+        ), parse_mode="Markdown")
+        time.sleep(0.5)
+        handle_preferences_menu(chat_id, user, db)
+        return
+    send_main_menu(chat_id, user, db)
+
+def handle_remember(chat_id, user, db):
+    prefs = get_user_prefs(user)
+    pref_labels = " · ".join(REGIONS[k]["label"] for k in prefs) if prefs else "Not set"
+    tier = "🔐 ADMIN" if is_admin(user.user_id) else ("💎 VIP" if user.is_vip else "🆓 FREE")
+    exp = user.vip_expiry if user.is_vip else "—"
+    joined = user.created_at.strftime("%d %b %Y") if user.created_at else "—"
+    last = user.last_seen.strftime("%d %b %Y %H:%M") if user.last_seen else "—"
+    msg = (
+        f"🧠 *What BetMaster Remembers About You*\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 User ID: `{user.user_id}`\n"
+        f"👤 Name: {user.first_name or user.username or 'Anon'}\n"
+        f"📅 Member since: {joined}\n"
+        f"👁 Last seen: {last}\n"
+        f"📊 Total visits: {getattr(user, 'total_visits', 0) or 0}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏅 Tier: {tier}\n"
+        f"💎 VIP until: {exp}\n"
+        f"💳 Preferred plan: *{user.preferred_plan or 'Not set'}*\n"
+        f"🎯 Preferences: {pref_labels}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 Total predictions: {user.total_predictions or 0}\n"
+        f"🔥 Current streak: {user.streak or 0} (best: {user.best_streak or 0})\n"
+        f"🎁 Referrals: {user.referral_count or 0}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"✅ *Your account is permanently stored.*\n"
+        f"Even if you clear your Telegram history or reinstall the app, "
+        f"just send /start — I'll remember everything.\n\n"
+        f"To reset your preferences: /preferences"
+    )
+    send_message(chat_id, msg, reply_markup=add_footer_button(), parse_mode="Markdown")
+
 # ── REGION HANDLER ──
 REGION_LABELS = {
     "europe": ("🇪🇺 *EUROPEAN FIXTURES*","Europe"),
@@ -1285,7 +1400,7 @@ def handle_region(chat_id, user, db, region_key, min_fixtures=15):
     ]}
     send_message(chat_id, msg, reply_markup=kb, parse_mode="Markdown")
 
-# ── PREDICTION FORMATTER (with interactive buttons) ──
+# ── PREDICTION FORMATTER ──
 def format_full_prediction(chat_id, fixture, show_all_markets=True):
     p = predict_match(fixture)
     mt = p.get("market_table", {})
@@ -1665,6 +1780,8 @@ def handle_admin_user_lookup(chat_id, uid):
             f"Username: @{u.username or '—'}\n"
             f"Tier: {'VIP' if u.is_vip else 'FREE'}\n"
             f"VIP until: {u.vip_expiry or '—'}\n"
+            f"Preferred plan: {u.preferred_plan or '—'}\n"
+            f"Visits: {u.total_visits or 0}\n"
             f"Predictions: {u.total_predictions or 0}\n"
             f"Referrals: {u.referral_count or 0}\n"
             f"Prefs: {', '.join(prefs) if prefs else '—'}"
@@ -1799,7 +1916,9 @@ def handle_menu_callback(chat_id, user, db, action, msg_id=None):
             f"👤 *Your Profile*\n\nName: {user.first_name or user.username or 'Anon'}\n"
             f"Tier: {tier}\nVIP until: {exp}\n"
             f"Daily used: {user.daily_count}/{limit}\n\n"
-            f"⚙️ Preferences: {plabels}"
+            f"⚙️ Preferences: {plabels}\n"
+            f"💳 Preferred plan: {user.preferred_plan or 'Not set'}\n"
+            f"📊 Total visits: {getattr(user, 'total_visits', 0) or 0}"
         ), reply_markup=add_footer_button(), parse_mode="Markdown")
     elif action == "menu_prefs": handle_preferences_menu(chat_id, user, db)
     elif action == "menu_refer":
@@ -1839,6 +1958,7 @@ def handle_menu_callback(chat_id, user, db, action, msg_id=None):
             f"*VIP:* /accumulator /million\n"
             f"*Leagues:* /europeanleagues /asianleagues /americanleagues /africanleagues /national\n"
             f"*Team Stats:* /stats Arsenal — form, goals, BTTS, Over 2.5\n"
+            f"*Memory:* /remember — see everything I know about you\n"
             f"*Account:* /stats /leaderboard /refer /profile /preferences /upgrade\n"
             f"*Or send:* `Arsenal vs Chelsea` for instant analysis\n\n"
             f"💡 *After any prediction you get interactive buttons:*\n"
@@ -1888,7 +2008,6 @@ def process_update(upd):
                     handle_pref_toggle(chat_id, user2, db2, data.replace("pref_toggle_",""), msg_id=msg_id); return
                 if data == "pref_reset": handle_pref_reset(chat_id, user2, db2, msg_id=msg_id); return
                 if data == "pref_confirm": handle_pref_confirm(chat_id, user2, db2, msg_id=msg_id); return
-                # ── Interactive prediction buttons ──
                 if data.startswith("h2h|"):
                     try:
                         _, h, a = data.split("|", 2)
@@ -1943,7 +2062,6 @@ def process_update(upd):
             FREE, VIP = 2, 10
             cur = 999999 if admin else (VIP if user.is_vip else FREE)
 
-            # Admin
             if low.startswith("/admin") and admin:
                 parts = text.split(maxsplit=2)
                 sub = parts[0].lower()
@@ -1989,27 +2107,12 @@ def process_update(upd):
                     if rc and user.referred_by != rc: user.referred_by = rc; db.commit()
                 except: pass
 
-            if low.startswith("/start") and not user.preferences_set and not admin:
-                send_message(chat_id, (
-                    f"🏆 *WELCOME TO BETMASTER PRO!*\n\n"
-                    f"You're joining *5,000+ winners* who use AI to dominate the bookies.\n\n"
-                    f"🧠 Dixon-Coles AI engine · 13 markets\n"
-                    f"📊 Team stats · H2H · Odds compare\n"
-                    f"🌍 Africa · Asia · Europe · America · National\n"
-                    f"🎯 Correct Score + Handicap markets (VIP)\n"
-                    f"🎫 20-match Betslip with real booking codes (VIP)\n"
-                    f"🚀 N1M Challenge — ₦1,000 → ₦1,000,000\n\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"*First, let's set up your preferences.*\n"
-                    f"Pick up to *3 regions* you want predictions from."
-                ), parse_mode="Markdown")
-                time.sleep(0.5)
-                handle_preferences_menu(chat_id, user, db); return
-
             if low.startswith("/start") or low.startswith("/menu"):
-                send_main_menu(chat_id, user, db)
+                send_start_message(chat_id, user, db)
             elif low.startswith("/preferences"):
                 handle_preferences_menu(chat_id, user, db)
+            elif low.startswith("/remember"):
+                handle_remember(chat_id, user, db)
             elif low.startswith("/help"):
                 handle_menu_callback(chat_id, user, db, "menu_help")
             elif low.startswith("/europeanleagues"):
@@ -2204,6 +2307,7 @@ threading.Thread(target=daily_notification_loop, daemon=True).start()
 async def on_startup():
     set_bot_menu()
     print(f"[startup] Admins: {ADMIN_IDS}")
+    print(f"[startup] DB URL: {DATABASE_URL.split('@')[-1] if '@' in DATABASE_URL else DATABASE_URL[:40]}")
     try:
         url = (f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
                f"?url={RENDER_URL}/webhook&drop_pending_updates=true")
@@ -2214,12 +2318,13 @@ async def on_startup():
 # ── FASTAPI ──
 @app.get("/")
 async def home():
-    return {"status":"BetMaster Pro v6 — VIP markets + proof page + team stats + interactive buttons",
+    return {"status":"BetMaster Pro v7 — Full Persistence + Interactive",
             "admins":len(ADMIN_IDS),
             "features":["vip markets","proof page","league gating","preferences",
                         "personalized accumulator","daily push","betslip codes",
                         "N1M challenge","admin panel","team stats","h2h","form",
-                        "odds compare"],
+                        "odds compare","persistent memory","welcome back",
+                        "preferred plan"],
             "brain":f"{len(HISTORICAL_STATS)} teams"}
 
 @app.post("/webhook")
@@ -2247,6 +2352,24 @@ async def admin_whoami(uid: str = ""):
     try: uid_int = int(uid)
     except: return {"error":"Provide ?uid=123456789"}
     return {"uid":uid_int,"is_admin":is_admin(uid_int)}
+
+@app.get("/debug-db")
+async def debug_db():
+    db = SessionLocal()
+    try:
+        total = db.query(User).count()
+        recent = db.query(User).order_by(User.last_seen.desc()).limit(5).all()
+        return {
+            "db_url": DATABASE_URL.split("@")[-1] if "@" in DATABASE_URL else DATABASE_URL[:30],
+            "persistent": "postgresql" in DATABASE_URL or "/data/" in DATABASE_URL,
+            "total_users": total,
+            "recent_users": [
+                {"id": u.user_id, "name": u.first_name, "visits": u.total_visits or 0,
+                 "pref_plan": u.preferred_plan or "", "tier": "VIP" if u.is_vip else "FREE"}
+                for u in recent
+            ],
+        }
+    finally: db.close()
 
 # ── PROOF SECTION ──
 def fetch_proofs_for_page():
@@ -2310,12 +2433,29 @@ def build_proof_html():
 @app.get("/subscribe", response_class=HTMLResponse)
 async def subscribe(request: Request):
     uid = request.query_params.get("uid", "")
-    return HTMLResponse(render_payment_page(uid, build_proof_html()))
+    preferred = ""
+    try:
+        dbs = SessionLocal()
+        usr = dbs.query(User).filter(User.user_id == int(uid)).first()
+        if usr and usr.preferred_plan:
+            preferred = usr.preferred_plan
+        dbs.close()
+    except Exception:
+        pass
+    return HTMLResponse(render_payment_page(uid, build_proof_html(), preferred))
 
 @app.get("/pay")
 async def pay(plan: str, uid: str):
     if not FLW_SECRET:
         return HTMLResponse(render_failed_page("Payment not configured.", uid), status_code=500)
+    try:
+        dbp = SessionLocal()
+        up = get_user(dbp, int(uid))
+        up.preferred_plan = plan
+        dbp.commit()
+        dbp.close()
+    except Exception as e:
+        print(f"[pay] save preferred_plan: {e}")
     if plan not in ("daily","weekly","monthly"):
         return HTMLResponse(render_failed_page(f"Invalid plan: {plan}", uid), status_code=400)
     amounts = {"daily":500,"weekly":2000,"monthly":5000}
@@ -2399,7 +2539,7 @@ background:linear-gradient(180deg,#fff,#b8c1d6);-webkit-background-clip:text;
 p.lead{color:#8b94ab;font-size:15px;margin-bottom:30px}
 .plans{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:50px}
 .plan{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);
-border-radius:16px;padding:26px 22px}
+border-radius:16px;padding:26px 22px;position:relative}
 .plan.featured{border-color:rgba(59,130,246,.4);
 background:linear-gradient(180deg,rgba(59,130,246,.06),rgba(59,130,246,.02));
 box-shadow:0 20px 60px -20px rgba(59,130,246,.35)}
@@ -2414,6 +2554,8 @@ ul li:before{content:"✅ ";color:#22c55e}
 color:white;text-align:center;font-weight:600;font-size:14.5px;margin-top:16px}
 .btn-g{background:linear-gradient(135deg,#22c55e,#16a34a)}
 .btn-b{background:linear-gradient(135deg,#3b82f6,#2563eb)}
+.pref-badge{color:#f5b945;font-size:11px;display:block;margin-bottom:6px;
+font-weight:700;letter-spacing:.05em}
 .proofs{margin:50px 0;padding:30px 24px;background:rgba(34,197,94,.04);
 border:1px solid rgba(34,197,94,.15);border-radius:20px}
 .proofs-header{text-align:center;margin-bottom:26px}
@@ -2455,14 +2597,14 @@ text-align:center;font-size:12px;color:#5a6378}
 <h1>Unlock AI Football Predictions</h1>
 <p class="lead">13 markets · Personalized to your regions · Real SportyBet + Football.com codes</p>
 <div class="plans">
-<div class="plan"><div class="name">Daily</div><div class="price">₦500<small>/24h</small></div>
+<div class="plan">{{BADGE_DAILY}}<div class="name">Daily</div><div class="price">₦500<small>/24h</small></div>
 <ul><li>10 predictions</li><li>All VIP markets</li><li>Real codes</li></ul>
 <a href="/pay?plan=daily&uid={{UID}}" class="btn btn-g">Get 24h</a></div>
-<div class="plan featured"><div class="name">Monthly (Best)</div>
+<div class="plan featured">{{BADGE_MONTHLY}}<div class="name">Monthly (Best)</div>
 <div class="price">₦5,000<small>/month</small></div>
 <ul><li>Everything</li><li>Priority support</li><li>Early features</li></ul>
 <a href="/pay?plan=monthly&uid={{UID}}" class="btn btn-b">Get Monthly</a></div>
-<div class="plan"><div class="name">Weekly</div><div class="price">₦2,000<small>/week</small></div>
+<div class="plan">{{BADGE_WEEKLY}}<div class="name">Weekly</div><div class="price">₦2,000<small>/week</small></div>
 <ul><li>10 predictions/day</li><li>All 13 markets</li><li>Value bets</li></ul>
 <a href="/pay?plan=weekly&uid={{UID}}" class="btn btn-g">Get Weekly</a></div>
 </div>
@@ -2501,12 +2643,19 @@ a{display:block;padding:14px;border-radius:12px;text-decoration:none;margin-top:
 <a href="/subscribe?uid={{UID}}" class="a">Try Again</a>
 <a href="{{BOT_LINK}}" class="b">Contact Support</a></div></body></html>"""
 
-def render_payment_page(uid, proofs_html=""):
+def render_payment_page(uid, proofs_html="", preferred=""):
     from datetime import datetime as _dt
-    return (PAYMENT_TEMPLATE.replace("{{UID}}", str(uid))
-            .replace("{{BOT_LINK}}", BOT_LINK)
-            .replace("{{PROOFS}}", proofs_html)
-            .replace("{{YEAR}}", str(_dt.now().year)))
+    def badge(p):
+        return ('<span class="pref-badge">⭐ YOUR PREVIOUS CHOICE</span>'
+                if preferred == p else "")
+    html = PAYMENT_TEMPLATE.replace("{{UID}}", str(uid))
+    html = html.replace("{{BOT_LINK}}", BOT_LINK)
+    html = html.replace("{{PROOFS}}", proofs_html)
+    html = html.replace("{{YEAR}}", str(_dt.now().year))
+    html = html.replace("{{BADGE_DAILY}}", badge("daily"))
+    html = html.replace("{{BADGE_WEEKLY}}", badge("weekly"))
+    html = html.replace("{{BADGE_MONTHLY}}", badge("monthly"))
+    return html
 
 def render_success_page(plan):
     return SUCCESS_TEMPLATE.replace("{{PLAN}}", plan.upper()).replace("{{BOT_LINK}}", BOT_LINK)
