@@ -1,28 +1,9 @@
 """
-main.py — BetMaster Pro v3
-Professional AI betting bot with:
-- 13-market Dixon-Coles predictions + value bets
-- Real SportyBet booking codes + Football.com conversion
-- 20-match accumulator with safety ranking
-- Professional inline menu + persistent "back to menu" buttons
-- Tier-based display, bankroll advisor, N1M challenge, admin panel
-
-Data sources: ESPN, TheSportsDB, OpenFootball, The Odds API, SportyBet API.
+main.py — BetMaster Pro v4
+Conversion-optimized AI betting bot with preference-based personalization.
 """
 
-import os
-import time
-import threading
-import requests
-import json
-import traceback
-import random
-import hashlib
-import csv
-import io
-import re
-import math
-import html
+import os, time, threading, requests, json, traceback, random, hashlib, csv, io, re, math, html
 from datetime import datetime, timedelta, date
 from collections import defaultdict
 
@@ -32,11 +13,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from dotenv import load_dotenv
 
+load_dotenv()
+
 # ──────────────────────────────────────────────
 # CONFIG
 # ──────────────────────────────────────────────
-load_dotenv()
-
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 CHANNEL_ID = (os.getenv("CHANNEL_ID") or "-1004371407166").strip()
 if CHANNEL_ID and not CHANNEL_ID.startswith("-"):
@@ -54,85 +35,78 @@ ADMIN_IDS = set()
 for _aid in ADMIN_IDS_RAW.split(","):
     _aid = _aid.strip()
     if _aid:
-        try:
-            ADMIN_IDS.add(int(_aid))
-        except Exception:
-            pass
+        try: ADMIN_IDS.add(int(_aid))
+        except: pass
 
 
-def is_admin(user_id) -> bool:
-    try:
-        return int(user_id) in ADMIN_IDS
-    except Exception:
-        return False
+def is_admin(uid):
+    try: return int(uid) in ADMIN_IDS
+    except: return False
 
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 SB_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "User-Agent": "Mozilla/5.0",
     "Accept": "application/json",
     "Content-Type": "application/json",
     "Current-Country": "NG",
-    "Accept-Language": "en-NG,en;q=0.9",
 }
 
 # ──────────────────────────────────────────────
-# MENUS
+# REGIONS
 # ──────────────────────────────────────────────
+REGIONS = {
+    "africa":   {"label": "🌍 Africa",   "emoji": "🌍"},
+    "asia":     {"label": "🌏 Asia",     "emoji": "🌏"},
+    "europe":   {"label": "🇪🇺 Europe",  "emoji": "🇪🇺"},
+    "america":  {"label": "🇺🇸 America", "emoji": "🇺🇸"},
+    "national": {"label": "🏆 National", "emoji": "🏆"},
+}
+REGION_KEYS = list(REGIONS.keys())
+MAX_PREFERENCES = 3
+
+# Reply keyboard
 BTN_TODAY = "⚽ Today's Fixtures"
 BTN_N1M = "🚀 N1M Challenge"
 BTN_EUROPE = "🇪🇺 European Leagues"
 BTN_ASIA = "🇯🇵 Asian Leagues"
 BTN_AMERICA = "🇺🇸 American Leagues"
+BTN_AFRICA = "🌍 African Leagues"
 BTN_ACCUMULATOR = "🎫 Accumulator"
+BTN_PREFERENCES = "⚙️ My Preferences"
 
 
-def get_main_keyboard(is_admin_user: bool = False):
-    """Persistent reply keyboard (bottom of screen)."""
-    keyboard = [
+def get_main_keyboard(is_admin_user=False):
+    kb = [
         [{"text": BTN_TODAY}, {"text": BTN_N1M}],
         [{"text": BTN_EUROPE}, {"text": BTN_ASIA}],
-        [{"text": BTN_AMERICA}, {"text": BTN_ACCUMULATOR}],
+        [{"text": BTN_AMERICA}, {"text": BTN_AFRICA}],
+        [{"text": BTN_ACCUMULATOR}, {"text": BTN_PREFERENCES}],
     ]
     if is_admin_user:
-        keyboard.append([{"text": "🔐 Admin Panel"}])
-    return {
-        "keyboard": keyboard,
-        "resize_keyboard": True,
-        "is_persistent": True,
-        "input_field_placeholder": "Tap a button or send Team A vs Team B",
-    }
+        kb.append([{"text": "🔐 Admin Panel"}])
+    return {"keyboard": kb, "resize_keyboard": True, "is_persistent": True,
+            "input_field_placeholder": "Tap a button or send Team A vs Team B"}
 
 
-def get_inline_menu(is_admin_user: bool = False):
-    """Beautiful inline menu shown under /start and /menu."""
+def get_inline_menu(is_admin_user=False):
     rows = [
         [{"text": "🧠  Analyze Top 5 Matches", "callback_data": "predict_top5"}],
-        [
-            {"text": "⚽ Today's Fixtures", "callback_data": "menu_today"},
-            {"text": "🎫  Accumulator", "callback_data": "build_accumulator"},
-        ],
-        [
-            {"text": "🇪🇺 European", "callback_data": "predict_european"},
-            {"text": "🇯🇵 Asian", "callback_data": "predict_asian"},
-        ],
-        [
-            {"text": "🇺🇸 American", "callback_data": "predict_american"},
-            {"text": "🌍 National", "callback_data": "predict_national"},
-        ],
+        [{"text": "⚽ Today's Fixtures", "callback_data": "menu_today"},
+         {"text": "🎫  Accumulator", "callback_data": "build_accumulator"}],
+        [{"text": "🇪🇺 Europe", "callback_data": "predict_europe"},
+         {"text": "🌏 Asia", "callback_data": "predict_asia"}],
+        [{"text": "🇺🇸 America", "callback_data": "predict_america"},
+         {"text": "🌍 Africa", "callback_data": "predict_africa"}],
+        [{"text": "🏆 National", "callback_data": "predict_national"},
+         {"text": "✅ Sure 10 Picks", "callback_data": "sure_10_all"}],
         [{"text": "🚀  N1M Challenge — ₦1,000 → ₦1,000,000", "callback_data": "n1m_challenge"}],
-        [
-            {"text": "📊 Stats", "callback_data": "menu_stats"},
-            {"text": "🏆 Leaderboard", "callback_data": "menu_leaderboard"},
-        ],
-        [
-            {"text": "👤 Profile", "callback_data": "menu_profile"},
-            {"text": "🎁 Refer & Earn", "callback_data": "menu_refer"},
-        ],
-        [
-            {"text": "💎 Upgrade to VIP", "callback_data": "menu_upgrade"},
-            {"text": "❓ Help", "callback_data": "menu_help"},
-        ],
+        [{"text": "📊 Stats", "callback_data": "menu_stats"},
+         {"text": "🏆 Leaderboard", "callback_data": "menu_leaderboard"}],
+        [{"text": "👤 Profile", "callback_data": "menu_profile"},
+         {"text": "⚙️ Preferences", "callback_data": "menu_prefs"}],
+        [{"text": "🎁 Refer & Earn", "callback_data": "menu_refer"},
+         {"text": "💎 Upgrade", "callback_data": "menu_upgrade"}],
     ]
     if is_admin_user:
         rows.append([{"text": "🔐 Admin Panel", "callback_data": "menu_admin"}])
@@ -140,17 +114,14 @@ def get_inline_menu(is_admin_user: bool = False):
 
 
 def get_footer_menu_button():
-    """Small footer row with a 'Main Menu' button for message footers."""
     return [{"text": "🏠 Main Menu", "callback_data": "menu_main"}]
 
 
 def add_footer_button(keyboard=None):
-    """Attach a '🏠 Main Menu' row to any inline keyboard (or create one)."""
     if keyboard is None:
         return {"inline_keyboard": [get_footer_menu_button()]}
     if "inline_keyboard" not in keyboard:
         keyboard = {"inline_keyboard": []}
-    # Avoid duplicates
     for row in keyboard["inline_keyboard"]:
         if any(b.get("callback_data") == "menu_main" for b in row):
             return keyboard
@@ -158,31 +129,11 @@ def add_footer_button(keyboard=None):
     return keyboard
 
 
-def build_welcome_text(first_name, tier, daily_count, limit, is_admin_user=False):
-    admin_line = "\n🔐 *ADMIN MODE ACTIVE*\n" if is_admin_user else ""
-    return (
-        f"👋 *Welcome to BetMaster Pro, {first_name or 'friend'}!*\n"
-        f"{admin_line}\n"
-        f"🧠 *Dixon-Coles AI* · 13 markets · value bets\n"
-        f"🌍 Europe · Asia · Americas · National teams\n"
-        f"🎫 *20-match Accumulator* with real SportyBet codes\n"
-        f"🚀 *N1M Challenge* — ₦1,000 → ₦1,000,000\n"
-        f"💰 *Bankroll advisor* on every pick\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🏅 *Tier:* {tier}\n"
-        f"📊 *Daily used:* {daily_count}/{limit}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👇 *Tap a button below to begin*"
-    )
-
-
 # ──────────────────────────────────────────────
 # DATABASE
 # ──────────────────────────────────────────────
-from sqlalchemy import (
-    create_engine, Column, Integer, String, Boolean, Float,
-    DateTime, Text, func
-)
+from sqlalchemy import (create_engine, Column, Integer, String, Boolean,
+                        Float, DateTime, Text, func)
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./betmaster.db")
@@ -190,14 +141,12 @@ if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 try:
-    engine = create_engine(
-        DATABASE_URL,
+    engine = create_engine(DATABASE_URL,
         connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
-        pool_pre_ping=True,
-    )
+        pool_pre_ping=True)
 except Exception:
     engine = create_engine("sqlite:///./betmaster.db",
-                           connect_args={"check_same_thread": False})
+        connect_args={"check_same_thread": False})
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
@@ -223,6 +172,12 @@ class User(Base):
     referral_count = Column(Integer, default=0)
     fav_leagues = Column(Text, default="")
     fav_markets = Column(Text, default="")
+    # v4: preferences
+    preferred_regions = Column(Text, default="")   # comma list
+    preferences_set = Column(Boolean, default=False)
+    # v4: daily notification
+    notified_today = Column(String, default="")
+    daily_notify_enabled = Column(Boolean, default=True)
     n1m_bankroll = Column(Float, default=0.0)
     n1m_best = Column(Float, default=0.0)
     bankroll = Column(Float, default=10000.0)
@@ -255,10 +210,8 @@ class Referral(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
-try:
-    Base.metadata.create_all(bind=engine)
-except Exception as e:
-    print(f"DB init error: {e}")
+try: Base.metadata.create_all(bind=engine)
+except Exception as e: print(f"DB init: {e}")
 
 
 # ──────────────────────────────────────────────
@@ -270,42 +223,35 @@ def get_user(db, user_id, username="", first_name=""):
         user = db.query(User).filter(User.user_id == user_id).first()
         if not user:
             ref_code = hashlib.md5(f"BM{user_id}{time.time()}".encode()).hexdigest()[:8].upper()
-            user = User(
-                user_id=user_id, username=username, first_name=first_name,
-                last_reset=today_str, daily_count=0,
-                referral_code=ref_code, last_seen=datetime.utcnow(),
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            return user
+            user = User(user_id=user_id, username=username, first_name=first_name,
+                        last_reset=today_str, daily_count=0, referral_code=ref_code,
+                        last_seen=datetime.utcnow())
+            db.add(user); db.commit(); db.refresh(user); return user
         if user.last_reset != today_str:
-            user.daily_count = 0
-            user.last_reset = today_str
-            db.commit()
+            user.daily_count = 0; user.last_reset = today_str; db.commit()
         if user.is_vip and user.vip_expiry and user.vip_expiry < today_str:
-            user.is_vip = False
-            user.vip_plan = ""
-            db.commit()
+            user.is_vip = False; user.vip_plan = ""; db.commit()
         user.last_seen = datetime.utcnow()
-        if username and user.username != username:
-            user.username = username
-        if first_name and user.first_name != first_name:
-            user.first_name = first_name
-        db.commit()
-        return user
+        if username and user.username != username: user.username = username
+        if first_name and user.first_name != first_name: user.first_name = first_name
+        db.commit(); return user
     except Exception as e:
-        print(f"get_user error: {e}")
+        print(f"get_user: {e}")
         class Dummy:
-            user_id = user_id; daily_count = 0; is_vip = False
-            vip_expiry = ""; streak = 0; best_streak = 0
-            total_predictions = 0; total_wins = 0; total_losses = 0
-            referral_code = ""; referral_count = 0
-            fav_leagues = ""; fav_markets = ""
-            n1m_bankroll = 0.0; n1m_best = 0.0
-            bankroll = 10000.0
-            is_banned = False
+            user_id=user_id; daily_count=0; is_vip=False; vip_expiry=""; vip_plan=""
+            streak=0; best_streak=0; total_predictions=0; total_wins=0; total_losses=0
+            referral_code=""; referral_count=0; fav_leagues=""; fav_markets=""
+            preferred_regions=""; preferences_set=False; notified_today=""
+            daily_notify_enabled=True
+            n1m_bankroll=0.0; n1m_best=0.0; bankroll=10000.0; is_banned=False
+            first_name=first_name; username=username
         return Dummy()
+
+
+def get_user_prefs(user):
+    """Return list of preferred region keys."""
+    raw = getattr(user, "preferred_regions", "") or ""
+    return [r for r in raw.split(",") if r in REGIONS]
 
 
 def activate_vip(uid, plan, silent=False):
@@ -314,44 +260,36 @@ def activate_vip(uid, plan, silent=False):
         user = get_user(db, int(uid))
         days = {"daily": 1, "weekly": 7, "monthly": 30}.get(plan, 30)
         expiry = date.today() + timedelta(days=days)
-        user.is_vip = True
-        user.vip_expiry = str(expiry)
-        user.vip_plan = plan
-        user.daily_count = 0
+        user.is_vip = True; user.vip_expiry = str(expiry)
+        user.vip_plan = plan; user.daily_count = 0
         db.commit()
         if not silent:
             send_message(int(uid), (
-                f"🎉 VIP {plan.upper()} ACTIVATED!\n\n"
-                f"Valid until: {expiry}\n\n"
-                f"You now have:\n"
+                f"🎉 *VIP {plan.upper()} ACTIVATED!*\n\n"
+                f"Valid until: *{expiry}*\n\n"
+                f"*You now have:*\n"
                 f"✅ 10 predictions/day\n"
                 f"✅ 🎫 20-match Accumulator + real booking codes\n"
                 f"✅ 🚀 N1M Challenge\n"
-                f"✅ Full 13-market probabilities\n\n"
-                f"Open the bot: {BOT_LINK}"
-            ), reply_markup=get_main_keyboard(is_admin(int(uid))))
+                f"✅ Full 13-market probabilities\n"
+                f"✅ Value-bet alerts + bankroll advisor\n\n"
+                f"Welcome to the winning side. 💎"
+            ), reply_markup=get_main_keyboard(is_admin(int(uid))), parse_mode="Markdown")
         return True
     except Exception as e:
-        print(f"activate_vip error: {e}")
-        return False
-    finally:
-        db.close()
+        print(f"activate_vip: {e}"); return False
+    finally: db.close()
 
 
 def revoke_vip(uid):
     db = SessionLocal()
     try:
         user = get_user(db, int(uid))
-        user.is_vip = False
-        user.vip_expiry = ""
-        user.vip_plan = ""
-        db.commit()
-        return True
+        user.is_vip = False; user.vip_expiry = ""; user.vip_plan = ""
+        db.commit(); return True
     except Exception as e:
-        print(f"revoke_vip error: {e}")
-        return False
-    finally:
-        db.close()
+        print(f"revoke_vip: {e}"); return False
+    finally: db.close()
 
 
 # ──────────────────────────────────────────────
@@ -363,87 +301,76 @@ ODDS_CACHE = {"time": None, "data": {}}
 LEAGUE_AVG_GOALS = {}
 SB_EVENTS_CACHE = {"time": None, "data": []}
 
-TOP_LEAGUES = ["premier league", "la liga", "serie a", "bundesliga",
-               "ligue 1", "champions league", "eredivisie", "primeira",
-               "mls", "brasileir", "liga mx", "chinese super", "j1 league",
-               "k league", "saudi pro"]
+TOP_LEAGUES = ["premier league", "la liga", "serie a", "bundesliga", "ligue 1",
+               "champions league", "eredivisie", "primeira", "mls", "brasileir",
+               "liga mx", "chinese super", "j1 league", "k league", "saudi pro"]
 
 
 def is_youth(t):
     t = str(t).lower()
-    return any(x in t for x in ["u21", "u-21", "u19", "u-20", "u23", "u17",
-                                 "youth", "under 21", "women", "wfc"])
+    return any(x in t for x in ["u21","u-21","u19","u-20","u23","u17","youth",
+                                 "under 21","women","wfc"])
 
 
 def calc(o, s):
-    try:
-        return round(float(o) * s, 2)
-    except Exception:
-        return 0
+    try: return round(float(o) * s, 2)
+    except: return 0
 
 
 def load_brain():
     global HISTORICAL_STATS, LEAGUE_AVG_GOALS
-    codes = ["E0", "SP1", "D1", "I1", "F1", "E1", "E2", "E3",
-             "SP2", "D2", "I2", "F2", "N1", "B1", "P1", "T1", "G1", "SC0"]
+    codes = ["E0","SP1","D1","I1","F1","E1","E2","E3","SP2","D2","I2","F2",
+             "N1","B1","P1","T1","G1","SC0"]
     for code in codes:
         try:
             url = f"https://www.football-data.co.uk/mmz4281/2526/{code}.csv"
             r = requests.get(url, headers=HEADERS, timeout=15)
-            if r.status_code != 200:
-                continue
+            if r.status_code != 200: continue
             reader = csv.DictReader(io.StringIO(r.text))
             rows = list(reader)[-120:]
             league_goals = []
             for row in rows:
-                home = row.get("HomeTeam", "")
-                away = row.get("AwayTeam", "")
-                if not home or not away:
-                    continue
+                home = row.get("HomeTeam",""); away = row.get("AwayTeam","")
+                if not home or not away: continue
                 for team in [home, away]:
                     if team not in HISTORICAL_STATS:
-                        HISTORICAL_STATS[team] = {
-                            "games": 0, "scored": 0, "conceded": 0,
-                            "wins": 0, "draws": 0, "losses": 0,
-                            "form": [], "btts": 0, "over15": 0,
-                            "over25": 0, "over35": 0, "clean": 0,
-                            "failed_score": 0, "league": code,
-                        }
+                        HISTORICAL_STATS[team] = {"games":0,"scored":0,"conceded":0,
+                            "wins":0,"draws":0,"losses":0,"form":[],"btts":0,
+                            "over15":0,"over25":0,"over35":0,"clean":0,
+                            "failed_score":0,"league":code}
                 try:
-                    fthg = int(row.get("FTHG", 0) or 0)
-                    ftag = int(row.get("FTAG", 0) or 0)
-                except Exception:
-                    continue
-                league_goals.append(fthg + ftag)
+                    fthg = int(row.get("FTHG",0) or 0); ftag = int(row.get("FTAG",0) or 0)
+                except: continue
+                league_goals.append(fthg+ftag)
                 HISTORICAL_STATS[home]["games"] += 1
                 HISTORICAL_STATS[away]["games"] += 1
                 HISTORICAL_STATS[home]["scored"] += fthg
                 HISTORICAL_STATS[home]["conceded"] += ftag
                 HISTORICAL_STATS[away]["scored"] += ftag
                 HISTORICAL_STATS[away]["conceded"] += fthg
-                if fthg > 0 and ftag > 0:
+                if fthg>0 and ftag>0:
                     HISTORICAL_STATS[home]["btts"] += 1
                     HISTORICAL_STATS[away]["btts"] += 1
                 else:
-                    if fthg == 0: HISTORICAL_STATS[home]["failed_score"] += 1
-                    if ftag == 0: HISTORICAL_STATS[away]["failed_score"] += 1
-                    if ftag == 0: HISTORICAL_STATS[home]["clean"] += 1
-                    if fthg == 0: HISTORICAL_STATS[away]["clean"] += 1
-                if fthg + ftag > 1:
+                    if fthg==0: HISTORICAL_STATS[home]["failed_score"] += 1
+                    if ftag==0: HISTORICAL_STATS[away]["failed_score"] += 1
+                    if ftag==0: HISTORICAL_STATS[home]["clean"] += 1
+                    if fthg==0: HISTORICAL_STATS[away]["clean"] += 1
+                if fthg+ftag>1:
                     HISTORICAL_STATS[home]["over15"] += 1
                     HISTORICAL_STATS[away]["over15"] += 1
-                if fthg + ftag > 2:
+                if fthg+ftag>2:
                     HISTORICAL_STATS[home]["over25"] += 1
                     HISTORICAL_STATS[away]["over25"] += 1
-                if fthg + ftag > 3:
+                if fthg+ftag>3:
                     HISTORICAL_STATS[home]["over35"] += 1
                     HISTORICAL_STATS[away]["over35"] += 1
-                if fthg > ftag:
+                if fthg>ftag:
                     HISTORICAL_STATS[home]["wins"] += 1
                     HISTORICAL_STATS[home]["form"].append("W")
                     HISTORICAL_STATS[away]["losses"] += 1
                     HISTORICAL_STATS[away]["form"].append("L")
-                elif fthg == ftag:
+                elif fthg==ftag:
                     HISTORICAL_STATS[home]["draws"] += 1
                     HISTORICAL_STATS[home]["form"].append("D")
                     HISTORICAL_STATS[away]["draws"] += 1
@@ -453,27 +380,19 @@ def load_brain():
                     HISTORICAL_STATS[home]["form"].append("L")
                     HISTORICAL_STATS[away]["wins"] += 1
                     HISTORICAL_STATS[away]["form"].append("W")
-                h2h_key = f"{home}_vs_{away}"
-                if h2h_key not in H2H_CACHE:
-                    H2H_CACHE[h2h_key] = []
-                H2H_CACHE[h2h_key].append({
-                    "home": home, "away": away, "fthg": fthg, "ftag": ftag,
-                    "result": "H" if fthg > ftag else "A" if ftag > fthg else "D",
-                    "total": fthg + ftag,
-                    "btts": 1 if fthg > 0 and ftag > 0 else 0,
-                })
-            if league_goals:
-                LEAGUE_AVG_GOALS[code] = sum(league_goals) / len(league_goals)
+                hk = f"{home}_vs_{away}"
+                if hk not in H2H_CACHE: H2H_CACHE[hk] = []
+                H2H_CACHE[hk].append({"home":home,"away":away,"fthg":fthg,"ftag":ftag,
+                    "result":"H" if fthg>ftag else "A" if ftag>fthg else "D",
+                    "total":fthg+ftag,"btts":1 if fthg>0 and ftag>0 else 0})
+            if league_goals: LEAGUE_AVG_GOALS[code] = sum(league_goals)/len(league_goals)
             for k in HISTORICAL_STATS:
-                if len(HISTORICAL_STATS[k]["form"]) > 5:
+                if len(HISTORICAL_STATS[k]["form"])>5:
                     HISTORICAL_STATS[k]["form"] = HISTORICAL_STATS[k]["form"][-5:]
-        except Exception as e:
-            print(f"Brain load error {code}: {e}")
+        except Exception as e: print(f"Brain {code}: {e}")
     for code in codes:
-        if code not in LEAGUE_AVG_GOALS:
-            LEAGUE_AVG_GOALS[code] = 2.65
-    print(f"BRAIN loaded {len(HISTORICAL_STATS)} teams, "
-          f"H2H {len(H2H_CACHE)} pairs, {len(LEAGUE_AVG_GOALS)} leagues")
+        if code not in LEAGUE_AVG_GOALS: LEAGUE_AVG_GOALS[code] = 2.65
+    print(f"BRAIN: {len(HISTORICAL_STATS)} teams, {len(H2H_CACHE)} H2H, {len(LEAGUE_AVG_GOALS)} leagues")
 
 
 # ──────────────────────────────────────────────
@@ -481,228 +400,164 @@ def load_brain():
 # ──────────────────────────────────────────────
 def estimate_team_strengths(team_name, league_code="E0"):
     stats = HISTORICAL_STATS.get(team_name)
-    league_avg = LEAGUE_AVG_GOALS.get(league_code, 2.65) / 2.0
-    if not stats or stats["games"] < 3:
-        return {"attack": 1.0, "defense": 1.0, "games": 0, "source": "neutral"}
+    league_avg = LEAGUE_AVG_GOALS.get(league_code, 2.65)/2.0
+    if not stats or stats["games"]<3:
+        return {"attack":1.0,"defense":1.0,"games":0,"source":"neutral"}
     games = stats["games"]
-    attack = max(0.4, min(2.5, (stats["scored"] / games) / league_avg))
-    defense = max(0.4, min(2.5, (stats["conceded"] / games) / league_avg))
-    return {
-        "attack": round(attack, 3), "defense": round(defense, 3),
-        "games": games,
-        "avg_scored": round(stats["scored"] / games, 2),
-        "avg_conceded": round(stats["conceded"] / games, 2),
-        "source": "historical",
-    }
+    attack = max(0.4, min(2.5, (stats["scored"]/games)/league_avg))
+    defense = max(0.4, min(2.5, (stats["conceded"]/games)/league_avg))
+    return {"attack":round(attack,3),"defense":round(defense,3),"games":games,
+            "avg_scored":round(stats["scored"]/games,2),
+            "avg_conceded":round(stats["conceded"]/games,2),"source":"historical"}
 
 
 def dixon_coles_predict(home_team, away_team, league_code="E0",
                         home_advantage=0.20, rho=-0.05, max_goals=6):
     h = estimate_team_strengths(home_team, league_code)
     a = estimate_team_strengths(away_team, league_code)
-    league_avg_per_team = LEAGUE_AVG_GOALS.get(league_code, 2.65) / 2.0
-    home_xg = max(0.3, min(4.5, h["attack"] * a["defense"] * league_avg_per_team * math.exp(home_advantage)))
-    away_xg = max(0.3, min(4.5, a["attack"] * h["defense"] * league_avg_per_team))
+    lpt = LEAGUE_AVG_GOALS.get(league_code, 2.65)/2.0
+    hx = max(0.3, min(4.5, h["attack"]*a["defense"]*lpt*math.exp(home_advantage)))
+    ax = max(0.3, min(4.5, a["attack"]*h["defense"]*lpt))
     probs = np.zeros((max_goals, max_goals))
     for i in range(max_goals):
         for j in range(max_goals):
-            p = poisson.pmf(i, home_xg) * poisson.pmf(j, away_xg)
-            if i <= 1 and j <= 1:
-                if i == 0 and j == 0: p *= (1 - home_xg * away_xg * rho)
-                elif i == 0 and j == 1: p *= (1 + home_xg * rho)
-                elif i == 1 and j == 0: p *= (1 + away_xg * rho)
-                elif i == 1 and j == 1: p *= (1 - rho)
+            p = poisson.pmf(i, hx) * poisson.pmf(j, ax)
+            if i<=1 and j<=1:
+                if i==0 and j==0: p *= (1 - hx*ax*rho)
+                elif i==0 and j==1: p *= (1 + hx*rho)
+                elif i==1 and j==0: p *= (1 + ax*rho)
+                elif i==1 and j==1: p *= (1 - rho)
             probs[i][j] = max(0, p)
     total = probs.sum()
-    if total <= 0:
-        return {"home_win": 33.3, "draw": 33.3, "away_win": 33.3,
-                "home_xg": round(home_xg, 2), "away_xg": round(away_xg, 2),
-                "top_scorelines": [], "btts": 50.0, "over15": 50.0,
-                "over25": 50.0, "over35": 50.0, "top_cs": "1-0",
-                "home_strength": h, "away_strength": a}
+    if total<=0:
+        return {"home_win":33.3,"draw":33.3,"away_win":33.3,"home_xg":round(hx,2),
+                "away_xg":round(ax,2),"top_scorelines":[],"btts":50.0,
+                "over15":50.0,"over25":50.0,"over35":50.0,"top_cs":"1-0",
+                "home_strength":h,"away_strength":a}
     probs /= total
-    home_win = float(np.tril(probs, -1).sum()) * 100
-    draw = float(np.trace(probs)) * 100
-    away_win = float(np.triu(probs, 1).sum()) * 100
-    btts = float(probs[1:, 1:].sum()) * 100
-    over25 = sum(probs[i][j] for i in range(max_goals) for j in range(max_goals) if i + j >= 3) * 100
-    over15 = sum(probs[i][j] for i in range(max_goals) for j in range(max_goals) if i + j >= 2) * 100
-    over35 = sum(probs[i][j] for i in range(max_goals) for j in range(max_goals) if i + j >= 4) * 100
-    scores = [(f"{i}-{j}", round(float(probs[i][j]) * 100, 2))
+    home_win = float(np.tril(probs,-1).sum())*100
+    draw = float(np.trace(probs))*100
+    away_win = float(np.triu(probs,1).sum())*100
+    btts = float(probs[1:,1:].sum())*100
+    over25 = sum(probs[i][j] for i in range(max_goals) for j in range(max_goals) if i+j>=3)*100
+    over15 = sum(probs[i][j] for i in range(max_goals) for j in range(max_goals) if i+j>=2)*100
+    over35 = sum(probs[i][j] for i in range(max_goals) for j in range(max_goals) if i+j>=4)*100
+    scores = [(f"{i}-{j}", round(float(probs[i][j])*100,2))
               for i in range(max_goals) for j in range(max_goals)]
     scores.sort(key=lambda x: x[1], reverse=True)
-    top_scorelines = scores[:5]
-    return {
-        "home_win": round(home_win, 1), "draw": round(draw, 1),
-        "away_win": round(away_win, 1),
-        "home_xg": round(home_xg, 2), "away_xg": round(away_xg, 2),
-        "btts": round(btts, 1), "over15": round(over15, 1),
-        "over25": round(over25, 1), "over35": round(over35, 1),
-        "top_scorelines": top_scorelines,
-        "top_cs": top_scorelines[0][0] if top_scorelines else "1-0",
-        "home_strength": h, "away_strength": a,
-    }
+    return {"home_win":round(home_win,1),"draw":round(draw,1),"away_win":round(away_win,1),
+            "home_xg":round(hx,2),"away_xg":round(ax,2),"btts":round(btts,1),
+            "over15":round(over15,1),"over25":round(over25,1),"over35":round(over35,1),
+            "top_scorelines":scores[:5],
+            "top_cs":scores[0][0] if scores else "1-0",
+            "home_strength":h,"away_strength":a}
 
 
 def predict_match(data):
-    home = data.get("home", "Home")
-    away = data.get("away", "Away")
-    league_code = data.get("country", "E0")
-    if league_code not in LEAGUE_AVG_GOALS:
-        league_code = "E0"
+    home = data.get("home","Home"); away = data.get("away","Away")
+    league_code = data.get("country","E0")
+    if league_code not in LEAGUE_AVG_GOALS: league_code = "E0"
+    dc = dixon_coles_predict(home, away, league_code)
+    hk = f"{home}_vs_{away}"; hr = f"{away}_vs_{home}"
+    h2h = H2H_CACHE.get(hk,[]) + H2H_CACHE.get(hr,[])
+    hw = len([g for g in h2h if (g["home"]==home and g["result"]=="H") or (g["away"]==home and g["result"]=="A")])
+    aw = len([g for g in h2h if (g["home"]==away and g["result"]=="H") or (g["away"]==away and g["result"]=="A")])
+    hd = len([g for g in h2h if g["result"]=="D"])
+    hb = len([g for g in h2h if g["btts"]==1])
+    h_avg = (sum(g["total"] for g in h2h)/len(h2h)) if h2h else 0
 
-    dc = dixon_coles_predict(home, away, league_code=league_code)
-
-    h2h_key = f"{home}_vs_{away}"
-    h2h_rev = f"{away}_vs_{home}"
-    h2h_games = H2H_CACHE.get(h2h_key, []) + H2H_CACHE.get(h2h_rev, [])
-    h2h_home_wins = len([g for g in h2h_games if
-                         (g["home"] == home and g["result"] == "H") or
-                         (g["away"] == home and g["result"] == "A")])
-    h2h_away_wins = len([g for g in h2h_games if
-                         (g["home"] == away and g["result"] == "H") or
-                         (g["away"] == away and g["result"] == "A")])
-    h2h_draws = len([g for g in h2h_games if g["result"] == "D"])
-    h2h_btts = len([g for g in h2h_games if g["btts"] == 1])
-    h2h_avg_goals = (sum(g["total"] for g in h2h_games) / len(h2h_games)) if h2h_games else 0
-
-    dc_h, dc_d, dc_a = dc["home_win"], dc["draw"], dc["away_win"]
-    if h2h_games and len(h2h_games) >= 3:
+    dh, dd, da = dc["home_win"], dc["draw"], dc["away_win"]
+    if h2h and len(h2h)>=3:
         w = 0.20
-        dc_h = dc_h * (1 - w) + (h2h_home_wins / len(h2h_games) * 100) * w
-        dc_d = dc_d * (1 - w) + (h2h_draws / len(h2h_games) * 100) * w
-        dc_a = dc_a * (1 - w) + (h2h_away_wins / len(h2h_games) * 100) * w
+        dh = dh*(1-w) + (hw/len(h2h)*100)*w
+        dd = dd*(1-w) + (hd/len(h2h)*100)*w
+        da = da*(1-w) + (aw/len(h2h)*100)*w
+    tot = dh+dd+da
+    if tot>0: dh,dd,da = dh/tot*100, dd/tot*100, da/tot*100
 
-    tot = dc_h + dc_d + dc_a
-    if tot > 0:
-        dc_h, dc_d, dc_a = dc_h / tot * 100, dc_d / tot * 100, dc_a / tot * 100
+    p1,pX,p2 = round(dh,1), round(dd,1), round(da,1)
+    p1X,pX2,p12 = round(p1+pX,1), round(pX+p2,1), round(p1+p2,1)
+    pBTTS_y = round(dc["btts"],1); pBTTS_n = round(100-pBTTS_y,1)
+    pO15,pO25,pO35 = round(dc["over15"],1), round(dc["over25"],1), round(dc["over35"],1)
+    pU15,pU25,pU35 = round(100-pO15,1), round(100-pO25,1), round(100-pO35,1)
 
-    p1 = round(dc_h, 1); pX = round(dc_d, 1); p2 = round(dc_a, 1)
-    p1X = round(p1 + pX, 1); pX2 = round(pX + p2, 1); p12 = round(p1 + p2, 1)
-    pBTTS_yes = round(dc["btts"], 1); pBTTS_no = round(100 - pBTTS_yes, 1)
-    pO15 = round(dc["over15"], 1); pO25 = round(dc["over25"], 1); pO35 = round(dc["over35"], 1)
-    pU15 = round(100 - pO15, 1); pU25 = round(100 - pO25, 1); pU35 = round(100 - pO35, 1)
+    mt = {"1":p1,"X":pX,"2":p2,"1X":p1X,"X2":pX2,"12":p12,
+          "BTTS Yes":pBTTS_y,"BTTS No":pBTTS_n,
+          "Over 1.5":pO15,"Over 2.5":pO25,"Over 3.5":pO35,
+          "Under 1.5":pU15,"Under 2.5":pU25,"Under 3.5":pU35}
 
-    market_table = {
-        "1": p1, "X": pX, "2": p2,
-        "1X": p1X, "X2": pX2, "12": p12,
-        "BTTS Yes": pBTTS_yes, "BTTS No": pBTTS_no,
-        "Over 1.5": pO15, "Over 2.5": pO25, "Over 3.5": pO35,
-        "Under 1.5": pU15, "Under 2.5": pU25, "Under 3.5": pU35,
-    }
+    oh = float(data.get("odds_h",0) or 0) or round(100/max(p1,5),2)
+    od = float(data.get("odds_d",0) or 0) or round(100/max(pX,5),2)
+    oa = float(data.get("odds_a",0) or 0) or round(100/max(p2,5),2)
+    ob_y = float(data.get("odds_btts",0) or 0) or round(100/max(pBTTS_y,5),2)
+    ob_n = round(100/max(pBTTS_n,5),2)
+    oo25 = float(data.get("odds_over25",0) or 0) or round(100/max(pO25,5),2)
+    ou25 = round(100/max(pU25,5),2)
+    o1X = round(100/max(p1X,5),2); oX2 = round(100/max(pX2,5),2); o12 = round(100/max(p12,5),2)
+    oo15 = round(100/max(pO15,5),2); oo35 = round(100/max(pO35,5),2)
+    ou15 = round(100/max(pU15,5),2); ou35 = round(100/max(pU35,5),2)
 
-    odds_h = float(data.get("odds_h", 0) or 0) or round(100 / max(p1, 5), 2)
-    odds_d = float(data.get("odds_d", 0) or 0) or round(100 / max(pX, 5), 2)
-    odds_a = float(data.get("odds_a", 0) or 0) or round(100 / max(p2, 5), 2)
-    odds_btts_y = float(data.get("odds_btts", 0) or 0) or round(100 / max(pBTTS_yes, 5), 2)
-    odds_btts_n = round(100 / max(pBTTS_no, 5), 2)
-    odds_o25 = float(data.get("odds_over25", 0) or 0) or round(100 / max(pO25, 5), 2)
-    odds_u25 = round(100 / max(pU25, 5), 2)
-    odds_1X = round(100 / max(p1X, 5), 2)
-    odds_X2 = round(100 / max(pX2, 5), 2)
-    odds_12 = round(100 / max(p12, 5), 2)
-    odds_o15 = round(100 / max(pO15, 5), 2)
-    odds_o35 = round(100 / max(pO35, 5), 2)
-    odds_u15 = round(100 / max(pU15, 5), 2)
-    odds_u35 = round(100 / max(pU35, 5), 2)
+    cands = []
+    def add(m, pick, prob, odds, reason):
+        if prob<8 or prob>95 or not odds or odds<=1.01: return
+        implied = 100.0/odds; edge = round(prob-implied,2)
+        cands.append({"market":m,"pick":pick,"prob":round(prob,1),
+                      "conf":round(prob,1),"odds":round(odds,2),"edge":edge,"reason":reason})
 
-    candidates = []
+    add("1X2", f"{home} Win (1)", p1, oh, f"{home} win {p1}%")
+    add("1X2", "Draw (X)", pX, od, f"Draw {pX}%")
+    add("1X2", f"{away} Win (2)", p2, oa, f"{away} win {p2}%")
+    add("DC", f"{home} or Draw (1X)", p1X, o1X, f"1X {p1X}%")
+    add("DC", f"Draw or {away} (X2)", pX2, oX2, f"X2 {pX2}%")
+    add("DC", f"{home} or {away} (12)", p12, o12, f"12 {p12}%")
+    add("BTTS", "BTTS Yes", pBTTS_y, ob_y, f"BTTS Y {pBTTS_y}%")
+    add("BTTS", "BTTS No", pBTTS_n, ob_n, f"BTTS N {pBTTS_n}%")
+    add("O/U", "Over 1.5 Goals", pO15, oo15, f"O1.5 {pO15}%")
+    add("O/U", "Over 2.5 Goals", pO25, oo25, f"O2.5 {pO25}%")
+    add("O/U", "Over 3.5 Goals", pO35, oo35, f"O3.5 {pO35}%")
+    add("O/U", "Under 1.5 Goals", pU15, ou15, f"U1.5 {pU15}%")
+    add("O/U", "Under 2.5 Goals", pU25, ou25, f"U2.5 {pU25}%")
+    add("O/U", "Under 3.5 Goals", pU35, ou35, f"U3.5 {pU35}%")
 
-    def add(market, pick, prob, odds_val, reason):
-        if prob < 8 or prob > 95:
-            return
-        if not odds_val or odds_val <= 1.01:
-            return
-        implied = 100.0 / odds_val
-        edge = round(prob - implied, 2)
-        candidates.append({
-            "market": market, "pick": pick, "prob": round(prob, 1),
-            "conf": round(prob, 1), "odds": round(odds_val, 2),
-            "edge": edge, "reason": reason,
-        })
-
-    add("1X2", f"{home} Win (1)", p1, odds_h, f"{home} win {p1}%.")
-    add("1X2", "Draw (X)", pX, odds_d, f"Draw {pX}%.")
-    add("1X2", f"{away} Win (2)", p2, odds_a, f"{away} win {p2}%.")
-    add("DC", f"{home} or Draw (1X)", p1X, odds_1X, f"1X {p1X}%.")
-    add("DC", f"Draw or {away} (X2)", pX2, odds_X2, f"X2 {pX2}%.")
-    add("DC", f"{home} or {away} (12)", p12, odds_12, f"12 {p12}%.")
-    add("BTTS", "BTTS Yes", pBTTS_yes, odds_btts_y, f"BTTS {pBTTS_yes}%.")
-    add("BTTS", "BTTS No", pBTTS_no, odds_btts_n, f"BTTS No {pBTTS_no}%.")
-    add("O/U", "Over 1.5 Goals", pO15, odds_o15, f"O1.5 {pO15}%.")
-    add("O/U", "Over 2.5 Goals", pO25, odds_o25, f"O2.5 {pO25}%.")
-    add("O/U", "Over 3.5 Goals", pO35, odds_o35, f"O3.5 {pO35}%.")
-    add("O/U", "Under 1.5 Goals", pU15, odds_u15, f"U1.5 {pU15}%.")
-    add("O/U", "Under 2.5 Goals", pU25, odds_u25, f"U2.5 {pU25}%.")
-    add("O/U", "Under 3.5 Goals", pU35, odds_u35, f"U3.5 {pU35}%.")
-
-    seen = set()
-    unique = []
-    for c in candidates:
-        if c["pick"] not in seen:
-            seen.add(c["pick"])
-            unique.append(c)
-    candidates = unique
-    candidates.sort(key=lambda x: x["conf"], reverse=True)
-
-    safe_pool = [c for c in candidates if c["odds"] >= 1.15] or candidates
+    seen = set(); uniq = []
+    for c in cands:
+        if c["pick"] not in seen: seen.add(c["pick"]); uniq.append(c)
+    cands = uniq
+    cands.sort(key=lambda x: x["conf"], reverse=True)
+    safe_pool = [c for c in cands if c["odds"]>=1.15] or cands
     best = max(safe_pool, key=lambda x: (x["conf"], x["edge"]))
+    value_pool = sorted([c for c in cands if c["edge"]>2 and c["odds"]>=1.30],
+                        key=lambda x: x["edge"], reverse=True)[:3]
 
-    value_pool = sorted(
-        [c for c in candidates if c["edge"] > 2 and c["odds"] >= 1.30],
-        key=lambda x: x["edge"], reverse=True,
-    )
-    value_picks = value_pool[:3]
-
-    h_form = "".join(HISTORICAL_STATS.get(home, {}).get("form", [])[:5]) or "N/A"
-    a_form = "".join(HISTORICAL_STATS.get(away, {}).get("form", [])[:5]) or "N/A"
-
+    hf = "".join(HISTORICAL_STATS.get(home,{}).get("form",[])[:5]) or "N/A"
+    af = "".join(HISTORICAL_STATS.get(away,{}).get("form",[])[:5]) or "N/A"
     h2h_str = "No H2H data"
-    if h2h_games:
-        h2h_str = (f"H2H last {len(h2h_games)}: {home} {h2h_home_wins}W "
-                   f"{h2h_draws}D {h2h_away_wins}W, BTTS {h2h_btts}/{len(h2h_games)}")
+    if h2h:
+        h2h_str = (f"H2H {len(h2h)}: {home} {hw}W {hd}D {aw}W | BTTS {hb}/{len(h2h)} | "
+                   f"Avg {h_avg:.1f} goals")
 
-    explanation = best["reason"]
-    if value_picks:
-        v = value_picks[0]
-        explanation += f"\n💎 VALUE: {v['pick']} @ {v['odds']} (+{v['edge']}%)"
+    expl = best["reason"]
+    if value_pool: expl += f"\n💎 VALUE: {value_pool[0]['pick']} @ {value_pool[0]['odds']} (+{value_pool[0]['edge']}%)"
 
-    return {
-        "best_market": best["market"],
-        "best_pick": best["pick"],
-        "odds": float(best["odds"]),
-        "confidence": best["conf"],
-        "edge": best.get("edge", 0),
-        "explanation": explanation,
-        "verdict": f"{best['market']} — {best['pick']} @ {best['odds']} ({best['conf']}%)",
-        "all_markets": candidates,
-        "top_markets": candidates[:6],
-        "value_bets": value_picks,
-        "market_table": market_table,
-        "h2h": h2h_str,
-        "form": f"Form: {home} [{h_form}] | {away} [{a_form}]",
-        "standings": (f"xG: {home} {dc['home_xg']} — {away} {dc['away_xg']} | "
-                      f"1X2: {p1}%/{pX}%/{p2}%"),
-        "live_odds_source": data.get("source", "Model"),
-        "winnings_1000": calc(best["odds"], 1000),
-        "dc": dc,
-        "disclaimer": "\n18+ Bet responsibly.",
-    }
+    return {"best_market":best["market"],"best_pick":best["pick"],"odds":float(best["odds"]),
+            "confidence":best["conf"],"edge":best.get("edge",0),"explanation":expl,
+            "verdict":f"{best['market']} — {best['pick']} @ {best['odds']} ({best['conf']}%)",
+            "all_markets":cands,"top_markets":cands[:8],"value_bets":value_pool,
+            "market_table":mt,"h2h":h2h_str,
+            "form":f"Form: {home} [{hf}] | {away} [{af}]",
+            "standings":f"xG: {home} {dc['home_xg']} — {away} {dc['away_xg']}",
+            "live_odds_source":data.get("source","Model"),
+            "winnings_1000":calc(best["odds"],1000),"dc":dc,
+            "disclaimer":"\n18+ Bet responsibly."}
 
 
-get_dynamic_ai_prediction = predict_match
-
-
-# ──────────────────────────────────────────────
-# BANKROLL ADVISOR
-# ──────────────────────────────────────────────
-def stake_advice(confidence, bankroll=10000.0):
-    if confidence >= 90: pct = 5.0
-    elif confidence >= 80: pct = 4.0
-    elif confidence >= 70: pct = 3.0
-    elif confidence >= 60: pct = 2.0
-    else: pct = 1.0
-    return {"percent": pct, "amount": round(bankroll * pct / 100, 2)}
+def stake_advice(conf, bankroll=10000.0):
+    if conf>=90: pct=5.0
+    elif conf>=80: pct=4.0
+    elif conf>=70: pct=3.0
+    elif conf>=60: pct=2.0
+    else: pct=1.0
+    return {"percent":pct,"amount":round(bankroll*pct/100,2)}
 
 
 # ──────────────────────────────────────────────
@@ -710,96 +565,114 @@ def stake_advice(confidence, bankroll=10000.0):
 # ──────────────────────────────────────────────
 def fetch_the_odds_api(date_obj):
     global ODDS_CACHE
-    if not THE_ODDS_API_KEY:
-        return {}
-    if (ODDS_CACHE["time"] and
-            (datetime.now() - ODDS_CACHE["time"]).seconds < 600 and ODDS_CACHE["data"]):
+    if not THE_ODDS_API_KEY: return {}
+    if ODDS_CACHE["time"] and (datetime.now()-ODDS_CACHE["time"]).seconds<600 and ODDS_CACHE["data"]:
         return ODDS_CACHE["data"]
-    iso = date_obj.strftime("%Y-%m-%d")
-    odds_map = {}
-    sports = [
-        "soccer_epl", "soccer_spain_la_liga", "soccer_germany_bundesliga",
-        "soccer_italy_serie_a", "soccer_france_ligue_one",
-        "soccer_uefa_champs_league", "soccer_uefa_nations_league",
-        "soccer_china_superleague", "soccer_usa_mls",
-        "soccer_brazil_campeonato", "soccer_mexico_ligamx",
-    ]
-    for sport in sports:
+    iso = date_obj.strftime("%Y-%m-%d"); om = {}
+    for sport in ["soccer_epl","soccer_spain_la_liga","soccer_germany_bundesliga",
+                  "soccer_italy_serie_a","soccer_france_ligue_one",
+                  "soccer_uefa_champs_league","soccer_china_superleague","soccer_usa_mls"]:
         try:
-            r = requests.get(
-                f"https://api.the-odds-api.com/v4/sports/{sport}/odds",
-                params={"apiKey": THE_ODDS_API_KEY, "regions": "eu,uk",
-                        "markets": "h2h,totals,btts", "oddsFormat": "decimal",
-                        "dateFormat": "iso"},
-                timeout=15,
-            )
-            if r.status_code != 200:
-                continue
+            r = requests.get(f"https://api.the-odds-api.com/v4/sports/{sport}/odds",
+                params={"apiKey":THE_ODDS_API_KEY,"regions":"eu,uk",
+                        "markets":"h2h,totals,btts","oddsFormat":"decimal",
+                        "dateFormat":"iso"}, timeout=15)
+            if r.status_code != 200: continue
             for game in r.json():
                 try:
-                    home = game["home_team"]; away = game["away_team"]
-                    if game["commence_time"][:10] != iso:
-                        continue
-                    best_h = best_d = best_a = 0
-                    best_over25 = best_btts = 0
-                    for bk in game.get("bookmakers", [])[:6]:
-                        for market in bk.get("markets", []):
-                            if market["key"] == "h2h":
-                                for o in market["outcomes"]:
-                                    if o["name"] == home: best_h = max(best_h, o["price"])
-                                    elif o["name"] == away: best_a = max(best_a, o["price"])
-                                    elif o["name"] == "Draw": best_d = max(best_d, o["price"])
-                            elif market["key"] == "totals":
-                                for o in market["outcomes"]:
-                                    if o["name"] == "Over" and o.get("point") == 2.5:
-                                        best_over25 = max(best_over25, o["price"])
-                            elif market["key"] == "btts":
-                                for o in market["outcomes"]:
-                                    if o["name"] == "Yes": best_btts = max(best_btts, o["price"])
-                    odds_map[f"{home}_vs_{away}"] = {
-                        "home": home, "away": away,
-                        "league": game.get("sport_title", ""),
-                        "odds_h": best_h or 0, "odds_d": best_d or 0, "odds_a": best_a or 0,
-                        "odds_over25": best_over25 or 0, "odds_btts": best_btts or 0,
-                        "source": "LIVE (Bet365/Pinnacle)",
-                    }
-                except Exception:
-                    continue
-        except Exception:
-            continue
-    ODDS_CACHE = {"time": datetime.now(), "data": odds_map}
-    return odds_map
+                    h = game["home_team"]; a = game["away_team"]
+                    if game["commence_time"][:10] != iso: continue
+                    bh=bd=ba=bo25=obb=0
+                    for bk in game.get("bookmakers",[])[:6]:
+                        for m in bk.get("markets",[]):
+                            if m["key"]=="h2h":
+                                for o in m["outcomes"]:
+                                    if o["name"]==h: bh=max(bh,o["price"])
+                                    elif o["name"]==a: ba=max(ba,o["price"])
+                                    elif o["name"]=="Draw": bd=max(bd,o["price"])
+                            elif m["key"]=="totals":
+                                for o in m["outcomes"]:
+                                    if o["name"]=="Over" and o.get("point")==2.5:
+                                        bo25=max(bo25,o["price"])
+                            elif m["key"]=="btts":
+                                for o in m["outcomes"]:
+                                    if o["name"]=="Yes": obb=max(obb,o["price"])
+                    om[f"{h}_vs_{a}"] = {"home":h,"away":a,"league":game.get("sport_title",""),
+                        "odds_h":bh or 0,"odds_d":bd or 0,"odds_a":ba or 0,
+                        "odds_over25":bo25 or 0,"odds_btts":obb or 0,
+                        "source":"LIVE (Bet365/Pinnacle)"}
+                except: continue
+        except: continue
+    ODDS_CACHE = {"time":datetime.now(),"data":om}; return om
 
 
 def enrich_with_odds(fixtures, date_obj):
-    odds_map = fetch_the_odds_api(date_obj)
+    om = fetch_the_odds_api(date_obj)
     for f in fixtures:
-        key = f"{f['home']}_vs_{f['away']}"
-        rev = f"{f['away']}_vs_{f['home']}"
-        live = odds_map.get(key) or odds_map.get(rev)
+        k = f"{f['home']}_vs_{f['away']}"; rv = f"{f['away']}_vs_{f['home']}"
+        live = om.get(k) or om.get(rv)
         if live:
-            f.update({
-                "odds_h": live["odds_h"] or f.get("odds_h", 0),
-                "odds_d": live["odds_d"] or f.get("odds_d", 0),
-                "odds_a": live["odds_a"] or f.get("odds_a", 0),
-                "odds_over25": live["odds_over25"] or f.get("odds_over25", 0),
-                "odds_btts": live["odds_btts"] or f.get("odds_btts", 0),
-                "source": live["source"],
-            })
+            f.update({"odds_h":live["odds_h"] or f.get("odds_h",0),
+                      "odds_d":live["odds_d"] or f.get("odds_d",0),
+                      "odds_a":live["odds_a"] or f.get("odds_a",0),
+                      "odds_over25":live["odds_over25"] or f.get("odds_over25",0),
+                      "odds_btts":live["odds_btts"] or f.get("odds_btts",0),
+                      "source":live["source"]})
         else:
-            for k in ["odds_h", "odds_d", "odds_a", "odds_over25", "odds_btts"]:
-                f.setdefault(k, 0)
-            f.setdefault("source", "Model")
+            for kk in ["odds_h","odds_d","odds_a","odds_over25","odds_btts"]:
+                f.setdefault(kk, 0)
+            f.setdefault("source","Model")
     return fixtures
 
 
 # ──────────────────────────────────────────────
-# FETCHER IMPORTS
+# FETCHER
 # ──────────────────────────────────────────────
-from fetcher import (
-    fetch_today_fixtures, fetch_by_region, fetch_espn,
-    fetch_thesportsdb, fetch_openfootball_national, deduplicate,
-)
+from fetcher import (fetch_today_fixtures, fetch_by_region, fetch_espn,
+                     fetch_thesportsdb, fetch_openfootball_national, deduplicate)
+
+
+REGION_TO_FETCHER_KEY = {
+    "europe": "european",
+    "asia": "asian",
+    "america": "american",
+    "national": "national",
+    "africa": "african",
+}
+
+
+def fetch_region_fixtures(region_key, days_ahead=0, limit=15):
+    """Fetch fixtures for a preferred-region key."""
+    fetcher_key = REGION_TO_FETCHER_KEY.get(region_key, region_key)
+    target = (datetime.utcnow() + timedelta(hours=1) + timedelta(days=days_ahead)).date()
+    try:
+        fixtures = fetch_by_region(target, fetcher_key, limit=limit)
+    except Exception:
+        fixtures = []
+    if not fixtures and days_ahead == 0:
+        for i in range(1, 8):
+            t2 = (datetime.utcnow() + timedelta(hours=1) + timedelta(days=i)).date()
+            try:
+                fixtures = fetch_by_region(t2, fetcher_key, limit=limit)
+            except Exception:
+                fixtures = []
+            if fixtures: break
+    return enrich_with_odds(fixtures, target)
+
+
+def fetch_all_fixtures(limit=15, preferred=None):
+    """Fetch across all or preferred regions."""
+    pool = []
+    keys = preferred if preferred else list(REGIONS.keys())
+    per = max(3, limit // max(len(keys), 1) + 1)
+    for k in keys:
+        pool.extend(fetch_region_fixtures(k, limit=per))
+    seen = set(); uniq = []
+    for f in pool:
+        key = f"{f['home']}-{f['away']}"
+        if key in seen: continue
+        seen.add(key); uniq.append(f)
+    return uniq[:limit]
 
 
 def fetch_real_fixtures(days_ahead=0, limit=10, region=None):
@@ -815,218 +688,130 @@ def fetch_real_fixtures(days_ahead=0, limit=10, region=None):
                 fixtures = fetch_by_region(t2, region, limit=limit)
             else:
                 fixtures = fetch_today_fixtures(t2, limit=limit)
-            if fixtures:
-                break
+            if fixtures: break
     return enrich_with_odds(fixtures, target)
 
 
 # ──────────────────────────────────────────────
-# SPORTYBET API
+# SPORTYBET
 # ──────────────────────────────────────────────
 def sb_fetch_events(timeline_hours=48, page_size=100):
     global SB_EVENTS_CACHE
     if (SB_EVENTS_CACHE["time"] and
-            (datetime.now() - SB_EVENTS_CACHE["time"]).seconds < 300 and
-            SB_EVENTS_CACHE["data"]):
+        (datetime.now()-SB_EVENTS_CACHE["time"]).seconds<300 and SB_EVENTS_CACHE["data"]):
         return SB_EVENTS_CACHE["data"]
-
-    url = "https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents"
-    params = {
-        "sportId": "sr:sport:1",
-        "marketId": "1,18,10,29",
-        "pageSize": min(page_size, 100),
-        "pageNum": 1,
-        "timeline": min(timeline_hours, 720),
-        "_t": int(time.time() * 1000),
-    }
     try:
-        r = requests.get(url, params=params, headers=SB_HEADERS, timeout=15)
-        if r.status_code != 200:
-            print(f"[SportyBet] HTTP {r.status_code}")
-            return []
-        data = r.json()
-        tournaments = data.get("data", {}).get("tournaments", []) or []
+        r = requests.get("https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents",
+            params={"sportId":"sr:sport:1","marketId":"1,18,10,29",
+                    "pageSize":min(page_size,100),"pageNum":1,
+                    "timeline":min(timeline_hours,720),
+                    "_t":int(time.time()*1000)}, headers=SB_HEADERS, timeout=15)
+        if r.status_code != 200: return []
+        tournaments = r.json().get("data",{}).get("tournaments",[]) or []
         events = []
         for t in tournaments:
-            league = t.get("name", "")
-            for ev in t.get("events", []) or []:
-                home = ev.get("homeTeamName", "")
-                away = ev.get("awayTeamName", "")
-                if not home or not away:
-                    continue
-                if is_youth(home) or is_youth(away):
-                    continue
-                odds_h = odds_d = odds_a = 0
-                odds_over25 = odds_btts = 0
-                for m in ev.get("markets", []) or []:
-                    mid = str(m.get("id", ""))
-                    if mid == "1":
-                        for o in m.get("outcomes", []) or []:
-                            oid = str(o.get("id", ""))
-                            try: price = float(o.get("odds", 0) or 0)
-                            except Exception: price = 0
-                            if oid == "1": odds_h = price
-                            elif oid == "2": odds_d = price
-                            elif oid == "3": odds_a = price
-                    elif mid == "18":
-                        for o in m.get("outcomes", []) or []:
-                            if o.get("specifier") == "total=2.5" and str(o.get("id")) == "12":
-                                try: odds_over25 = float(o.get("odds", 0) or 0)
-                                except Exception: pass
-                    elif mid == "29":
-                        for o in m.get("outcomes", []) or []:
-                            if str(o.get("id")) == "1":
-                                try: odds_btts = float(o.get("odds", 0) or 0)
-                                except Exception: pass
-
-                kickoff_ms = ev.get("estimateStartTime", 0) or 0
-                kickoff = datetime.utcfromtimestamp(kickoff_ms / 1000) if kickoff_ms else datetime.utcnow()
-                wat = kickoff + timedelta(hours=1)
-
-                events.append({
-                    "eventId": ev.get("eventId", ""),
-                    "home": home, "away": away, "league": league,
-                    "date": wat.strftime("%Y-%m-%d"),
-                    "time": wat.strftime("%H:%M"),
-                    "country": "E0",
-                    "odds_h": odds_h, "odds_d": odds_d, "odds_a": odds_a,
-                    "odds_over25": odds_over25, "odds_btts": odds_btts,
-                    "source": "SportyBet LIVE",
-                })
-        SB_EVENTS_CACHE = {"time": datetime.now(), "data": events}
-        print(f"[SportyBet] fetched {len(events)} events")
+            lg = t.get("name","")
+            for ev in t.get("events",[]) or []:
+                h = ev.get("homeTeamName",""); a = ev.get("awayTeamName","")
+                if not h or not a or is_youth(h) or is_youth(a): continue
+                oh=od=oa=oo25=ob=0
+                for m in ev.get("markets",[]) or []:
+                    mid = str(m.get("id",""))
+                    if mid=="1":
+                        for o in m.get("outcomes",[]) or []:
+                            oid = str(o.get("id",""))
+                            try: price=float(o.get("odds",0) or 0)
+                            except: price=0
+                            if oid=="1": oh=price
+                            elif oid=="2": od=price
+                            elif oid=="3": oa=price
+                    elif mid=="18":
+                        for o in m.get("outcomes",[]) or []:
+                            if o.get("specifier")=="total=2.5" and str(o.get("id"))=="12":
+                                try: oo25=float(o.get("odds",0) or 0)
+                                except: pass
+                    elif mid=="29":
+                        for o in m.get("outcomes",[]) or []:
+                            if str(o.get("id"))=="1":
+                                try: ob=float(o.get("odds",0) or 0)
+                                except: pass
+                km = ev.get("estimateStartTime",0) or 0
+                ko = datetime.utcfromtimestamp(km/1000) if km else datetime.utcnow()
+                wat = ko + timedelta(hours=1)
+                events.append({"eventId":ev.get("eventId",""),"home":h,"away":a,
+                    "league":lg,"date":wat.strftime("%Y-%m-%d"),
+                    "time":wat.strftime("%H:%M"),"country":"E0",
+                    "odds_h":oh,"odds_d":od,"odds_a":oa,
+                    "odds_over25":oo25,"odds_btts":ob,"source":"SportyBet LIVE"})
+        SB_EVENTS_CACHE = {"time":datetime.now(),"data":events}
         return events
     except Exception as e:
-        print(f"[SportyBet] error: {e}")
-        return []
+        print(f"[SportyBet] {e}"); return []
 
 
 def sb_book_bet(selections):
-    url = "https://www.sportybet.com/api/ng/orders/share"
     try:
-        r = requests.post(url, json={"selections": selections},
-                          headers=SB_HEADERS, timeout=20)
-        if r.status_code != 200:
-            print(f"[SportyBet book] HTTP {r.status_code}: {r.text[:300]}")
-            return None
-        data = r.json()
-        if data.get("bizCode") != 10000:
-            print(f"[SportyBet book] bizCode: {data.get('bizCode')}")
-            return None
-        d = data.get("data", {})
-        return {
-            "shareCode": d.get("shareCode", ""),
-            "shareURL": d.get("shareURL", ""),
-        }
+        r = requests.post("https://www.sportybet.com/api/ng/orders/share",
+            json={"selections":selections}, headers=SB_HEADERS, timeout=20)
+        if r.status_code != 200: return None
+        d = r.json()
+        if d.get("bizCode") != 10000: return None
+        dd = d.get("data",{})
+        return {"shareCode":dd.get("shareCode",""),"shareURL":dd.get("shareURL","")}
     except Exception as e:
-        print(f"[SportyBet book] error: {e}")
-        return None
+        print(f"[SB book] {e}"); return None
 
 
 def market_to_sb_selection(pick_data, event_id):
-    pick = pick_data.get("pick", "").lower()
-    if "home win" in pick or "(1)" in pick:
-        return {"eventId": event_id, "marketId": "1", "outcomeId": "1"}
-    if "draw (x)" in pick or pick == "draw":
-        return {"eventId": event_id, "marketId": "1", "outcomeId": "2"}
-    if "away win" in pick or "(2)" in pick:
-        return {"eventId": event_id, "marketId": "1", "outcomeId": "3"}
-    if "(1x)" in pick:
-        return {"eventId": event_id, "marketId": "10", "outcomeId": "1"}
-    if "(12)" in pick:
-        return {"eventId": event_id, "marketId": "10", "outcomeId": "2"}
-    if "(x2)" in pick:
-        return {"eventId": event_id, "marketId": "10", "outcomeId": "3"}
-    if "btts yes" in pick:
-        return {"eventId": event_id, "marketId": "29", "outcomeId": "1"}
-    if "btts no" in pick:
-        return {"eventId": event_id, "marketId": "29", "outcomeId": "2"}
-    for line in ["1.5", "2.5", "3.5"]:
-        if f"over {line}" in pick:
-            return {"eventId": event_id, "marketId": "18",
-                    "outcomeId": "12", "specifier": f"total={line}"}
-        if f"under {line}" in pick:
-            return {"eventId": event_id, "marketId": "18",
-                    "outcomeId": "13", "specifier": f"total={line}"}
+    p = pick_data.get("pick","").lower()
+    if "home win" in p or "(1)" in p: return {"eventId":event_id,"marketId":"1","outcomeId":"1"}
+    if "draw (x)" in p or p=="draw": return {"eventId":event_id,"marketId":"1","outcomeId":"2"}
+    if "away win" in p or "(2)" in p: return {"eventId":event_id,"marketId":"1","outcomeId":"3"}
+    if "(1x)" in p: return {"eventId":event_id,"marketId":"10","outcomeId":"1"}
+    if "(12)" in p: return {"eventId":event_id,"marketId":"10","outcomeId":"2"}
+    if "(x2)" in p: return {"eventId":event_id,"marketId":"10","outcomeId":"3"}
+    if "btts yes" in p: return {"eventId":event_id,"marketId":"29","outcomeId":"1"}
+    if "btts no" in p: return {"eventId":event_id,"marketId":"29","outcomeId":"2"}
+    for line in ["1.5","2.5","3.5"]:
+        if f"over {line}" in p:
+            return {"eventId":event_id,"marketId":"18","outcomeId":"12","specifier":f"total={line}"}
+        if f"under {line}" in p:
+            return {"eventId":event_id,"marketId":"18","outcomeId":"13","specifier":f"total={line}"}
     return None
 
 
-# ──────────────────────────────────────────────
-# FOOTBALL.COM CONVERTER + DEEP LINKS
-# ──────────────────────────────────────────────
-def convert_sb_to_football(sb_code):
-    if not sb_code:
-        return None
+def sportybet_load_url(c):
+    return f"https://www.sportybet.com/ng/#/share/booking/{c}" if c else "https://www.sportybet.com/ng/sport/football"
+
+
+def football_com_load_url(c):
+    return f"https://www.football.com/en-ng/sports#/booking/{c}" if c else "https://www.football.com/en-ng/sports"
+
+
+def convert_sb_to_football(code):
+    if not code: return None
     try:
         r = requests.post("https://betrelay.com.ng/api/convert",
-                          json={"from": "sportybet", "to": "football", "code": sb_code},
-                          timeout=15)
+            json={"from":"sportybet","to":"football","code":code}, timeout=15)
         if r.status_code == 200:
-            data = r.json()
-            code = data.get("code") or data.get("converted_code") or data.get("result")
-            if code:
-                print(f"[BetRelay] {sb_code} → {code}")
-                return code
-    except Exception as e:
-        print(f"[BetRelay] error: {e}")
-    try:
-        r = requests.post("https://api.betconverter.app/convert",
-                          json={"from": "sportybet", "to": "football.com", "code": sb_code},
-                          timeout=12)
-        if r.status_code == 200:
-            data = r.json()
-            code = data.get("code") or data.get("converted")
-            if code:
-                return code
-    except Exception:
-        pass
+            d = r.json()
+            c = d.get("code") or d.get("converted_code") or d.get("result")
+            if c: return c
+    except: pass
     return None
 
 
-def sportybet_load_url(sb_code):
-    if not sb_code:
-        return "https://www.sportybet.com/ng/sport/football"
-    return f"https://www.sportybet.com/ng/#/share/booking/{sb_code}"
-
-
-def football_com_load_url(fb_code):
-    if not fb_code:
-        return "https://www.football.com/en-ng/sports"
-    return f"https://www.football.com/en-ng/sports#/booking/{fb_code}"
-
-
-def betking_load_url():
-    return "https://www.betking.com/sports"
-
-
-def onexbet_load_url():
-    return "https://1xbet.ng/en/line/football"
-
-
 # ──────────────────────────────────────────────
-# ACCUMULATOR BUILDER
+# ACCUMULATOR
 # ──────────────────────────────────────────────
 def safety_score(fixture, pred):
-    score = pred["confidence"]
-    if pred.get("edge", 0) >= 3:
-        score += 5
-    odds = pred["odds"]
+    score = pred.get("confidence", 0) + pred.get("edge", 0) * 0.5
+    odds = pred.get("odds", 2)
     if 1.5 <= odds <= 2.5: score += 6
     elif 1.3 <= odds < 1.5: score += 3
     elif odds > 3.5: score -= 8
-    league = fixture.get("league", "").lower()
-    if any(k in league for k in TOP_LEAGUES):
-        score += 8
-    try:
-        kick_dt = datetime.strptime(
-            f"{fixture.get('date','')} {fixture.get('time','00:00')}",
-            "%Y-%m-%d %H:%M")
-        hours = (kick_dt - datetime.utcnow()).total_seconds() / 3600
-        if 1 <= hours <= 12: score += 5
-        elif 12 < hours <= 24: score += 3
-        elif hours > 72: score -= 5
-    except Exception:
-        pass
+    lg = fixture.get("league","").lower()
+    if any(k in lg for k in TOP_LEAGUES): score += 8
     return score
 
 
@@ -1036,120 +821,70 @@ def build_accumulator(fixtures, target_matches=20, min_odds=1.20, max_odds=3.50)
         try:
             pred = predict_match(f)
             best = pred["all_markets"][0] if pred["all_markets"] else None
-            if not best:
-                continue
+            if not best: continue
             if best["odds"] < min_odds or best["odds"] > max_odds:
                 alt = next((m for m in pred["all_markets"]
-                            if min_odds <= m["odds"] <= max_odds and m["conf"] >= 55), None)
-                if not alt:
-                    continue
+                            if min_odds <= m["odds"] <= max_odds and m["conf"]>=55), None)
+                if not alt: continue
                 best = alt
-            sc = safety_score(f, {**pred, **best, "confidence": best["conf"]})
-            scored.append({"fixture": f, "pred": pred, "pick": best, "safety": sc})
-        except Exception:
-            continue
+            sc = safety_score(f, {**pred, **best, "confidence":best["conf"]})
+            scored.append({"fixture":f,"pred":pred,"pick":best,"safety":sc})
+        except: continue
     scored.sort(key=lambda x: x["safety"], reverse=True)
-
-    selected = []
-    league_count = defaultdict(int)
-    used_teams = set()
+    selected = []; league_count = defaultdict(int); used = set()
     for item in scored:
-        if len(selected) >= target_matches:
-            break
-        f = item["fixture"]
-        league = f.get("league", "")
-        home = f["home"]; away = f["away"]
-        if home in used_teams or away in used_teams:
-            continue
-        if league_count[league] >= 3:
-            continue
-        selected.append(item)
-        league_count[league] += 1
-        used_teams.add(home); used_teams.add(away)
+        if len(selected) >= target_matches: break
+        f = item["fixture"]; lg = f.get("league",""); h = f["home"]; a = f["away"]
+        if h in used or a in used: continue
+        if league_count[lg] >= 3: continue
+        selected.append(item); league_count[lg] += 1; used.add(h); used.add(a)
     return selected
 
 
 # ──────────────────────────────────────────────
-# PERSONALIZATION
+# PERSUASIVE CTA FOR FREE USERS
 # ──────────────────────────────────────────────
-def update_user_preferences(db, user, fixture, market):
-    try:
-        fav_l = set((user.fav_leagues or "").split(",")) - {""}
-        if fixture.get("league"):
-            fav_l.add(fixture["league"])
-        user.fav_leagues = ",".join(list(fav_l)[-10:])
-        fav_m = set((user.fav_markets or "").split(",")) - {""}
-        if market:
-            fav_m.add(market)
-        user.fav_markets = ",".join(list(fav_m)[-5:])
-        db.commit()
-    except Exception as e:
-        print(f"Pref update error: {e}")
+def build_upgrade_cta(user, hidden_count=8, context="daily", region_label=None):
+    """Build a highly persuasive upgrade CTA for free users."""
+    uid = user.user_id
+    region_txt = f" in {region_label}" if region_label else ""
+    return (
+        f"🔒 *{hidden_count} MORE WINNING PICKS{region_txt.upper()} ARE LOCKED*\n\n"
+        f"💎 VIP members are already profiting from these picks today.\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 *What VIP members are seeing RIGHT NOW:*\n"
+        f"✅ All 10 predictions/day (you get 2)\n"
+        f"✅ 🎫 20-match Accumulator with real SportyBet codes\n"
+        f"✅ 🚀 N1M Challenge — ₦1,000 → ₦1,000,000\n"
+        f"✅ Full 13-market probabilities per match\n"
+        f"✅ Bankroll advisor on every pick\n"
+        f"✅ Value-bet alerts before kickoff\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔥 *JOIN 5,000+ WINNING VIP MEMBERS*\n\n"
+        f"VIP users win *3x more* than free users because they see the full picture.\n"
+        f"Don't leave money on the table.\n\n"
+        f"⏰ *Limited-time offer:*\n"
+        f"First week for *₦1,600* (20% OFF)\n\n"
+        f"👇 *Choose your plan and start winning today*"
+    )
 
 
-def score_fixture_for_user(fixture, user):
-    score = 0
-    fav_leagues = set((user.fav_leagues or "").split(",")) - {""}
-    if fixture.get("league") in fav_leagues:
-        score += 50
-    league = fixture.get("league", "").lower()
-    if any(k in league for k in TOP_LEAGUES):
-        score += 20
-    return score
+def upgrade_buttons(uid):
+    return {"inline_keyboard": [
+        [{"text": "💎 Weekly VIP — ₦2,000 (Best Start)",
+          "url": f"{RENDER_URL}/subscribe?uid={uid}"}],
+        [{"text": "💰 Monthly VIP — ₦5,000 (Save ₦3,000)",
+          "url": f"{RENDER_URL}/subscribe?uid={uid}"}],
+        [{"text": "⚡ 24h Trial — ₦500",
+          "url": f"{RENDER_URL}/subscribe?uid={uid}"}],
+        get_footer_menu_button(),
+    ]}
 
 
-# ──────────────────────────────────────────────
-# ENGAGEMENT
-# ──────────────────────────────────────────────
-def get_user_stats(db, uid):
-    try:
-        user = get_user(db, uid)
-        total = user.total_predictions or 0
-        wins = user.total_wins or 0
-        losses = user.total_losses or 0
-        win_rate = round(wins / total * 100, 1) if total > 0 else 0
-        return {
-            "streak": user.streak, "best_streak": user.best_streak,
-            "total": total, "wins": wins, "losses": losses,
-            "win_rate": win_rate, "referrals": user.referral_count or 0,
-            "n1m_bankroll": user.n1m_bankroll or 0.0,
-            "n1m_best": user.n1m_best or 0.0,
-            "bankroll": user.bankroll or 10000.0,
-        }
-    except Exception:
-        return {"streak": 0, "best_streak": 0, "total": 0, "wins": 0,
-                "losses": 0, "win_rate": 0, "referrals": 0,
-                "n1m_bankroll": 0.0, "n1m_best": 0.0, "bankroll": 10000.0}
-
-
-def award_referral(db, referrer_code, new_user_id):
-    try:
-        referrer = db.query(User).filter(User.referral_code == referrer_code).first()
-        if not referrer:
-            return
-        existing = db.query(Referral).filter(
-            Referral.referrer_id == referrer.user_id,
-            Referral.referred_id == new_user_id).first()
-        if existing:
-            return
-        db.add(Referral(referrer_id=referrer.user_id, referred_id=new_user_id, rewarded=True))
-        referrer.referral_count = (referrer.referral_count or 0) + 1
-        if referrer.is_vip and referrer.vip_expiry:
-            try:
-                current = datetime.strptime(referrer.vip_expiry, "%Y-%m-%d").date()
-                new_expiry = current + timedelta(days=7)
-            except Exception:
-                new_expiry = date.today() + timedelta(days=7)
-        else:
-            referrer.is_vip = True
-            new_expiry = date.today() + timedelta(days=7)
-        referrer.vip_expiry = str(new_expiry)
-        db.commit()
-        send_message(referrer.user_id,
-                     f"🎁 Referral Reward! +7 VIP days. Valid until {new_expiry}",
-                     reply_markup=get_main_keyboard(is_admin(referrer.user_id)))
-    except Exception as e:
-        print(f"Referral error: {e}")
+def send_upgrade_cta(chat_id, user, hidden_count=8, context="daily", region_label=None):
+    """Send the persuasive upgrade message with buttons."""
+    text = build_upgrade_cta(user, hidden_count, context, region_label)
+    send_message(chat_id, text, reply_markup=upgrade_buttons(user.user_id), parse_mode="Markdown")
 
 
 # ──────────────────────────────────────────────
@@ -1161,153 +896,203 @@ app = FastAPI()
 def send_message(chat_id, text, reply_markup=None, parse_mode=None):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        if len(text) > 4000:
-            text = text[:4000] + "..."
+        if len(text) > 4000: text = text[:4000] + "..."
         payload = {"chat_id": chat_id, "text": text}
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
+        if reply_markup: payload["reply_markup"] = reply_markup
+        if parse_mode: payload["parse_mode"] = parse_mode
         r = requests.post(url, json=payload, timeout=15)
-        if r.status_code == 200:
-            return r.json()
-        print(f"[send_message] HTTP {r.status_code}: {r.text[:300]}")
+        if r.status_code == 200: return r.json()
+        print(f"[send] {r.status_code}: {r.text[:200]}")
         if parse_mode:
             payload.pop("parse_mode", None)
-            clean = text.replace("*", "").replace("_", " ").replace("`", "")
-            payload["text"] = clean
+            payload["text"] = text.replace("*","").replace("_"," ").replace("`","")
             r2 = requests.post(url, json=payload, timeout=15)
-            if r2.status_code == 200:
-                return r2.json()
+            if r2.status_code == 200: return r2.json()
         return r.json() if r.content else None
     except Exception as e:
-        print(f"[send_message] Exception: {e}")
-        return None
+        print(f"[send] {e}"); return None
 
 
 def set_bot_menu():
-    commands = [
-        {"command": "start", "description": "🏠 Main menu"},
-        {"command": "menu", "description": "📱 Open menu"},
-        {"command": "today", "description": "⚽ Today's fixtures"},
-        {"command": "accumulator", "description": "🎫 20-match accumulator"},
-        {"command": "million", "description": "🚀 N1M challenge"},
-        {"command": "europeanleagues", "description": "🇪🇺 European leagues"},
-        {"command": "asianleagues", "description": "🇯🇵 Asian leagues"},
-        {"command": "americanleagues", "description": "🇺🇸 American leagues"},
-        {"command": "national", "description": "🌍 National teams"},
-        {"command": "stats", "description": "📊 Your stats"},
-        {"command": "leaderboard", "description": "🏆 Leaderboard"},
-        {"command": "refer", "description": "🎁 Refer & earn"},
-        {"command": "profile", "description": "👤 Your profile"},
-        {"command": "upgrade", "description": "💎 Upgrade to VIP"},
-        {"command": "help", "description": "❓ Help"},
+    cmds = [
+        {"command":"start","description":"🏠 Main menu"},
+        {"command":"menu","description":"📱 Open menu"},
+        {"command":"preferences","description":"⚙️ Set preferences"},
+        {"command":"today","description":"⚽ Today's fixtures"},
+        {"command":"accumulator","description":"🎫 20-match accumulator"},
+        {"command":"million","description":"🚀 N1M challenge"},
+        {"command":"europeanleagues","description":"🇪🇺 European leagues"},
+        {"command":"asianleagues","description":"🌏 Asian leagues"},
+        {"command":"americanleagues","description":"🇺🇸 American leagues"},
+        {"command":"africanleagues","description":"🌍 African leagues"},
+        {"command":"national","description":"🏆 National teams"},
+        {"command":"stats","description":"📊 Your stats"},
+        {"command":"upgrade","description":"💎 Upgrade to VIP"},
+        {"command":"help","description":"❓ Help"},
     ]
     try:
         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/setMyCommands",
-                      json={"commands": commands}, timeout=10)
-    except Exception:
-        pass
+                      json={"commands":cmds}, timeout=10)
+    except: pass
 
 
 # ──────────────────────────────────────────────
-# MENU SENDER
+# PREFERENCE SELECTION UI
 # ──────────────────────────────────────────────
-def send_main_menu(chat_id, user, db, edit_message_id=None):
-    """Send the beautiful main menu with inline buttons."""
-    admin = is_admin(user.user_id)
-    if admin:
-        limit = "∞"
-    elif user.is_vip:
-        limit = 10
+def get_preference_keyboard(user):
+    """Build inline keyboard for preference selection (toggle style)."""
+    prefs = set(get_user_prefs(user))
+    rows = []
+    row = []
+    for i, key in enumerate(REGION_KEYS):
+        info = REGIONS[key]
+        check = "✅" if key in prefs else "⚪"
+        btn = {"text": f"{check} {info['label']}", "callback_data": f"pref_toggle_{key}"}
+        row.append(btn)
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row: rows.append(row)
+
+    n = len(prefs)
+    if n == 0:
+        confirm_text = "✅ Confirm (Pick up to 3)"
+    elif n < MAX_PREFERENCES:
+        confirm_text = f"✅ Confirm ({n}/3 chosen)"
     else:
-        limit = 2
+        confirm_text = f"✅ Confirm ({n}/3 chosen — max reached)"
+
+    rows.append([{"text": confirm_text, "callback_data": "pref_confirm"}])
+    rows.append([{"text": "🔄 Reset", "callback_data": "pref_reset"}])
+    return {"inline_keyboard": rows}
+
+
+def get_preferences_intro_text(user):
+    prefs = get_user_prefs(user)
+    if prefs:
+        selected_labels = ", ".join(REGIONS[k]["label"] for k in prefs)
+        tail = f"\n\n*Currently selected:* {selected_labels}"
+    else:
+        tail = "\n\n_You haven't chosen yet._"
+    return (
+        f"⚙️ *SELECT YOUR BETTING PREFERENCES*\n\n"
+        f"Choose up to *3 regions* you want predictions from.\n"
+        f"Your daily picks and accumulators will be personalized to your choices.{tail}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👇 *Tap to select / deselect regions*"
+    )
+
+
+# ──────────────────────────────────────────────
+# MENU
+# ──────────────────────────────────────────────
+def send_main_menu(chat_id, user, db):
+    admin = is_admin(user.user_id)
+    limit = 999 if admin else (10 if user.is_vip else 2)
     tier = "🔐 ADMIN" if admin else ("💎 VIP" if user.is_vip else "🆓 FREE")
+    prefs = get_user_prefs(user)
+    pref_labels = " · ".join(REGIONS[k]["emoji"] for k in prefs) if prefs else "Not set"
 
-    text = build_welcome_text(user.first_name, tier, user.daily_count, limit, admin)
-    inline = get_inline_menu(admin)
+    # Free vs VIP value teaser
+    if user.is_vip or admin:
+        status_line = f"💎 *VIP ACTIVE* until {user.vip_expiry}"
+    else:
+        status_line = (f"🆓 *FREE TIER* — you're missing 8 winning picks today\n"
+                       f"💎 *Upgrade to unlock everything* 👇")
 
-    if edit_message_id:
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
-                json={
-                    "chat_id": chat_id,
-                    "message_id": edit_message_id,
-                    "text": text,
-                    "reply_markup": inline,
-                    "parse_mode": "Markdown",
-                },
-                timeout=15,
-            )
-            return
-        except Exception:
-            pass
+    text = (
+        f"🏆 *BETMASTER PRO* — AI Betting Intelligence\n\n"
+        f"🧠 Dixon-Coles AI engine · 13 markets\n"
+        f"🌍 Africa · Asia · Europe · America · National\n"
+        f"🎫 20-match Accumulator with real SportyBet codes\n"
+        f"🚀 N1M Challenge — ₦1,000 → ₦1,000,000\n"
+        f"💰 Bankroll advisor on every pick\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 *{user.first_name or user.username or 'Trader'}*\n"
+        f"🏅 Tier: {tier}\n"
+        f"📊 Daily used: {user.daily_count}/{limit}\n"
+        f"🎯 Preferences: {pref_labels}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{status_line}\n\n"
+        f"👇 *Tap a button to begin*"
+    )
 
-    send_message(chat_id, text, reply_markup=inline, parse_mode="Markdown")
-    # Also make sure the persistent reply keyboard is present
-    send_message(chat_id, "👇 Quick access buttons:", reply_markup=get_main_keyboard(admin))
+    send_message(chat_id, text, reply_markup=get_inline_menu(admin), parse_mode="Markdown")
+    send_message(chat_id, "⚡ Quick access buttons below", reply_markup=get_main_keyboard(admin))
 
 
 # ──────────────────────────────────────────────
-# REGION HANDLER
+# REGION HANDLER (15 fixtures + new buttons)
 # ──────────────────────────────────────────────
-REGION_INFO = {
-    "european": ("🇪🇺 EUROPEAN LEAGUES", "European"),
-    "asian": ("🇯🇵 ASIAN LEAGUES", "Asian"),
-    "american": ("🇺🇸 AMERICAN LEAGUES", "American"),
-    "national": ("🌍 NATIONAL TEAMS / FIFA", "National"),
+REGION_LABELS = {
+    "europe": ("🇪🇺 *EUROPEAN FIXTURES*", "Europe"),
+    "asia": ("🌏 *ASIAN FIXTURES*", "Asia"),
+    "america": ("🇺🇸 *AMERICAN FIXTURES*", "America"),
+    "africa": ("🌍 *AFRICAN FIXTURES*", "Africa"),
+    "national": ("🏆 *NATIONAL TEAMS*", "National"),
 }
 
 
-def handle_region(chat_id, user_id, region, user, db, limit):
-    header, pretty = REGION_INFO.get(region, ("FIXTURES", region.title()))
-    kb = get_main_keyboard(is_admin(user_id))
-    if user.daily_count >= limit:
-        send_message(chat_id, f"🚫 Daily limit {user.daily_count}/{limit}\n"
-                              f"Upgrade: {RENDER_URL}/subscribe?uid={user_id}",
-                     reply_markup=kb)
-        return
-    send_message(chat_id, f"🔎 Scanning {pretty} fixtures...", reply_markup=kb)
-    fixtures = fetch_real_fixtures(days_ahead=0, limit=15, region=region)
+def handle_region(chat_id, user, db, region_key, min_fixtures=15):
+    header, label = REGION_LABELS.get(region_key, ("FIXTURES","Region"))
+    admin = is_admin(user.user_id)
+    limit = 999 if admin else (10 if user.is_vip else 2)
+
+    send_message(chat_id, f"🔎 Scanning {label} fixtures...",
+                 reply_markup=get_main_keyboard(admin))
+
+    fixtures = fetch_region_fixtures(region_key, limit=min_fixtures)
+    if len(fixtures) < min_fixtures:
+        # top-up with all-region fetch
+        extra = fetch_all_fixtures(limit=min_fixtures*2)
+        exist = {f"{f['home']}-{f['away']}" for f in fixtures}
+        for ef in extra:
+            if f"{ef['home']}-{ef['away']}" not in exist:
+                fixtures.append(ef)
+            if len(fixtures) >= min_fixtures: break
+
     if not fixtures:
-        for i in range(1, 8):
-            fixtures = fetch_real_fixtures(days_ahead=i, limit=15, region=region)
-            if fixtures:
-                break
-    if not fixtures:
-        send_message(chat_id, f"No {pretty} fixtures.\n{BOT_LINK}", reply_markup=kb)
+        send_message(chat_id, f"No {label} fixtures available right now.\n{BOT_LINK}",
+                     reply_markup=add_footer_button())
         return
-    scored = [(f, score_fixture_for_user(f, user)) for f in fixtures]
-    scored.sort(key=lambda x: x[1], reverse=True)
-    fixtures = [f for f, _ in scored]
-    msg = f"{header}\n📅 {fixtures[0].get('date', 'Today')}\n\n"
-    for i, f in enumerate(fixtures[:10], 1):
-        msg += f"{i}. {f['home']} vs {f['away']}\n   🏆 {f.get('league', '')} · {f.get('time', '')}\n\n"
-    msg += f"({user.daily_count}/{limit}) Tap below"
-    inline_kb = add_footer_button({"inline_keyboard": [
-        [{"text": "🧠 Analyze Top 5 Matches", "callback_data": f"predict_{region}"}],
+
+    fixtures = fixtures[:min_fixtures]
+
+    msg = f"{header}\n📅 {fixtures[0].get('date','Today')}\n\n"
+    for i, f in enumerate(fixtures, 1):
+        msg += (f"{i}. *{f['home']} vs {f['away']}*\n"
+                f"   🏆 {f.get('league','')}\n"
+                f"   🕐 {f.get('time','')} WAT\n\n")
+    msg += f"*{len(fixtures)} matches loaded* — tap a button below"
+
+    kb = {"inline_keyboard": [
+        [{"text": f"🧠 Analyze Top 10 {label} Matches",
+          "callback_data": f"analyze10_{region_key}"}],
+        [{"text": f"✅ Sure 10 {label} Predictions",
+          "callback_data": f"sure10_{region_key}"}],
         [{"text": "🎫 20-Match Accumulator", "callback_data": "build_accumulator"}],
-    ]})
-    send_message(chat_id, msg, reply_markup=inline_kb)
+        get_footer_menu_button(),
+    ]}
+    send_message(chat_id, msg, reply_markup=kb, parse_mode="Markdown")
 
 
-def format_full_prediction(chat_id, fixture, show_all_markets=True):
+# ──────────────────────────────────────────────
+# PREDICTION FORMATTER
+# ──────────────────────────────────────────────
+def format_full_prediction(chat_id, fixture, show_all_markets=True, send=True):
     p = predict_match(fixture)
-    mt = p.get("market_table", {})
+    mt = p.get("market_table",{})
     sa = stake_advice(p["confidence"])
 
     msg = (
         f"⚽ *{fixture['home']} vs {fixture['away']}*\n"
-        f"🏆 {fixture.get('league','')} | {fixture.get('time','')} WAT\n\n"
+        f"🏆 {fixture.get('league','')} · {fixture.get('time','')} WAT\n\n"
         f"📊 {p['form']}\n"
         f"📈 {p['h2h']}\n\n"
         f"🏆 *SAFEST PICK*\n"
         f"✅ *{p['best_pick']}*\n"
-        f"   @ {p['odds']} · {p['confidence']}% conf"
+        f"   @ {p['odds']} · {p['confidence']}% confidence"
     )
-    if p.get("edge", 0) > 0:
-        msg += f" · +{p['edge']}% edge"
+    if p.get("edge",0) > 0: msg += f" · +{p['edge']}% edge"
     msg += f"\n   💰 Stake: {sa['percent']}% (N{sa['amount']} of N10,000)\n"
 
     if show_all_markets:
@@ -1325,254 +1110,336 @@ def format_full_prediction(chat_id, fixture, show_all_markets=True):
         for v in p["value_bets"][:2]:
             msg += f"   • {v['pick']} @ {v['odds']} (+{v['edge']}% edge)\n"
 
-    footer = add_footer_button()
-    send_message(chat_id, msg, reply_markup=footer, parse_mode="Markdown")
+    if send:
+        send_message(chat_id, msg, reply_markup=add_footer_button(), parse_mode="Markdown")
+    return msg
 
 
-def handle_analyze_top5(chat_id, user, db, region=None):
-    limit = 999999 if is_admin(user.user_id) else (10 if user.is_vip else 2)
-    if not is_admin(user.user_id) and user.daily_count >= limit:
-        send_message(chat_id, f"🚫 Daily limit {user.daily_count}/{limit}\n"
-                              f"Upgrade: {RENDER_URL}/subscribe?uid={user.user_id}",
-                     reply_markup=add_footer_button())
+# ──────────────────────────────────────────────
+# ANALYZE TOP 10
+# ──────────────────────────────────────────────
+def handle_analyze_top10(chat_id, user, db, region_key=None):
+    admin = is_admin(user.user_id)
+    limit = 999 if admin else (10 if user.is_vip else 2)
+    label = REGION_LABELS.get(region_key, ("","All"))[1] if region_key else "All"
+
+    if not admin and user.daily_count >= limit:
+        send_message(chat_id, f"🚫 Daily limit {user.daily_count}/{limit}",
+                     reply_markup=upgrade_buttons(user.user_id))
         return
 
-    if region:
-        fixtures = fetch_real_fixtures(days_ahead=0, limit=5, region=region)
-        if not fixtures:
-            for i in range(1, 8):
-                fixtures = fetch_real_fixtures(days_ahead=i, limit=5, region=region)
-                if fixtures:
-                    break
+    if region_key:
+        fixtures = fetch_region_fixtures(region_key, limit=10)
     else:
-        fixtures = fetch_real_fixtures(days_ahead=0, limit=5)
+        fixtures = fetch_all_fixtures(limit=10, preferred=get_user_prefs(user) or None)
 
     if not fixtures:
-        send_message(chat_id, f"No fixtures found.\n{BOT_LINK}",
+        send_message(chat_id, f"No fixtures available.\n{BOT_LINK}",
                      reply_markup=add_footer_button())
         return
 
     ranked = []
-    for f in fixtures:
-        pred = predict_match(f)
-        s = safety_score(f, pred)
-        ranked.append((s, f, pred))
+    for f in fixtures[:20]:
+        try:
+            pred = predict_match(f)
+            ranked.append((safety_score(f, pred), f, pred))
+        except: continue
     ranked.sort(key=lambda x: x[0], reverse=True)
+    ranked = ranked[:10]
 
-    is_vip = user.is_vip or is_admin(user.user_id)
-    visible = 5 if is_vip else 2
-    hidden_count = len(ranked) - visible
+    if not ranked:
+        send_message(chat_id, "Couldn't analyze matches right now.",
+                     reply_markup=add_footer_button())
+        return
 
-    send_message(chat_id, f"🧠 Analyzing Top {len(ranked)} matches...",
-                 reply_markup=get_main_keyboard(is_admin(user.user_id)))
+    is_vip = user.is_vip or admin
+    visible = 10 if is_vip else 2
+    hidden = len(ranked) - visible
+
+    send_message(chat_id, f"🧠 *Analyzing Top {len(ranked)} {label} matches...*",
+                 parse_mode="Markdown", reply_markup=get_main_keyboard(admin))
 
     for i, (_, f, _) in enumerate(ranked[:visible], 1):
-        send_message(chat_id, f"━━━ *#{i}* ━━━", parse_mode="Markdown")
+        send_message(chat_id, f"━━━ *#{i}* of {len(ranked)} ━━━", parse_mode="Markdown")
         format_full_prediction(chat_id, f, show_all_markets=is_vip)
         user.daily_count += 1
         db.commit()
         time.sleep(0.6)
 
-    if not is_vip and hidden_count > 0:
-        send_message(chat_id, (
-            f"🔒 *{hidden_count} more predictions hidden for VIP members.*\n\n"
-            f"💎 *VIP unlocks:*\n"
-            f"✅ All 5 daily predictions (not just 2)\n"
-            f"✅ 🎫 20-match Accumulator with real booking codes\n"
-            f"✅ 🚀 N1M Challenge\n"
-            f"✅ Full 13-market probabilities\n"
-            f"✅ Bankroll advisor + value-bet alerts\n\n"
-            f"👉 Upgrade: {RENDER_URL}/subscribe?uid={user.user_id}"
-        ), reply_markup=add_footer_button({"inline_keyboard": [[
-            {"text": "💎 Upgrade to VIP Now", "url": f"{RENDER_URL}/subscribe?uid={user.user_id}"}
-        ]]}), parse_mode="Markdown")
+    if not is_vip and hidden > 0:
+        send_upgrade_cta(chat_id, user, hidden_count=hidden, region_label=label)
     else:
-        send_message(chat_id,
-                     f"💎 Want a 20-match accumulator?\nTap 🎫 Accumulator or /accumulator",
+        send_message(chat_id, f"✅ All {len(ranked)} analyzed.",
                      reply_markup=add_footer_button())
 
 
 # ──────────────────────────────────────────────
-# ACCUMULATOR HANDLER
+# SURE 10
+# ──────────────────────────────────────────────
+def handle_sure_10(chat_id, user, db, region_key=None):
+    """Send the top 10 highest-confidence predictions (safest picks)."""
+    admin = is_admin(user.user_id)
+    limit = 999 if admin else (10 if user.is_vip else 2)
+    label = REGION_LABELS.get(region_key, ("","All"))[1] if region_key else "Global"
+
+    if not admin and user.daily_count >= limit:
+        send_message(chat_id, f"🚫 Daily limit {user.daily_count}/{limit}",
+                     reply_markup=upgrade_buttons(user.user_id))
+        return
+
+    send_message(chat_id, f"🎯 *Building your Sure 10 {label} predictions...*",
+                 parse_mode="Markdown", reply_markup=get_main_keyboard(admin))
+
+    # Fetch wide pool
+    if region_key:
+        pool = fetch_region_fixtures(region_key, limit=40)
+    else:
+        pool = fetch_all_fixtures(limit=40, preferred=get_user_prefs(user) or None)
+
+    if len(pool) < 10:
+        pool.extend(fetch_all_fixtures(limit=40))
+    pool = pool[:60]
+
+    if len(pool) < 5:
+        send_message(chat_id, f"Not enough fixtures ({len(pool)}). Try later.",
+                     reply_markup=add_footer_button())
+        return
+
+    # Score all
+    scored = []
+    for f in pool:
+        try:
+            p = predict_match(f)
+            # Pick the safest market with decent odds (>=1.25)
+            safe_picks = [m for m in p["all_markets"]
+                          if m["conf"] >= 55 and 1.25 <= m["odds"] <= 3.00]
+            if not safe_picks: continue
+            best = max(safe_picks, key=lambda m: (m["conf"] + m.get("edge",0)*0.3))
+            combined = best["conf"] + best.get("edge",0)*0.5
+            scored.append({"fixture":f, "pred":p, "pick":best, "score":combined})
+        except: continue
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+
+    # Diversity: max 2 per league
+    selected = []; league_count = defaultdict(int); used = set()
+    for item in scored:
+        if len(selected) >= 10: break
+        f = item["fixture"]
+        lg = f.get("league","")
+        if f["home"] in used or f["away"] in used: continue
+        if league_count[lg] >= 2: continue
+        selected.append(item); league_count[lg] += 1
+        used.add(f["home"]); used.add(f["away"])
+
+    if not selected:
+        send_message(chat_id, "Couldn't build Sure 10 today. Try later.",
+                     reply_markup=add_footer_button())
+        return
+
+    is_vip = user.is_vip or admin
+    visible = len(selected) if is_vip else 2
+    hidden = len(selected) - visible
+
+    # Header
+    total_odds = 1.0
+    for item in selected:
+        total_odds *= item["pick"]["odds"]
+    total_odds = round(total_odds, 2)
+
+    header = (
+        f"✅ *SURE 10 {label.upper()} PICKS*\n"
+        f"📅 {datetime.now().strftime('%d %b %Y')}\n\n"
+        f"🎯 10 highest-confidence predictions across {label}\n"
+        f"💰 Combined odds if all 10 hit: *{total_odds}*\n"
+        f"🔥 Recommended: Play as *Single Bets* — stake 2% per pick\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━"
+    )
+    send_message(chat_id, header, parse_mode="Markdown")
+
+    for i, item in enumerate(selected[:visible], 1):
+        f = item["fixture"]; pk = item["pick"]; sa = stake_advice(pk["conf"])
+        msg = (
+            f"*#{i}. {f['home']} vs {f['away']}*\n"
+            f"🏆 {f.get('league','')} · {f.get('time','')}\n\n"
+            f"✅ *{pk['pick']}* @ *{pk['odds']}*\n"
+            f"   🎯 Confidence: {pk['conf']}%"
+        )
+        if pk.get("edge",0) > 0: msg += f" · +{pk['edge']}% edge"
+        msg += f"\n   💰 Stake: {sa['percent']}% (N{sa['amount']} of N10,000)\n"
+        send_message(chat_id, msg, parse_mode="Markdown")
+        user.daily_count += 1
+        db.commit()
+        time.sleep(0.5)
+
+    if not is_vip and hidden > 0:
+        send_upgrade_cta(chat_id, user, hidden_count=hidden, region_label=label)
+    else:
+        send_message(chat_id, f"✅ All 10 sent. Good luck!",
+                     reply_markup=add_footer_button())
+
+
+# ──────────────────────────────────────────────
+# ACCUMULATOR HANDLER (respects preferences)
 # ──────────────────────────────────────────────
 def handle_accumulator(chat_id, user, db):
-    if not user.is_vip and not is_admin(user.user_id):
+    admin = is_admin(user.user_id)
+    if not user.is_vip and not admin:
         send_message(chat_id, (
             f"🎫 *20-Match Accumulator — VIP Only*\n\n"
             f"Build the smartest 20-match accumulator:\n"
-            f"✅ Ranked by form, standings, league tier\n"
+            f"✅ Personalized to *your* preferred regions\n"
             f"✅ Real SportyBet booking code (loads in one tap)\n"
             f"✅ Football.com + BetKing deep links\n"
             f"✅ Bankroll advisor per leg\n\n"
-            f"👉 Upgrade: {RENDER_URL}/subscribe?uid={user.user_id}"
-        ), reply_markup=add_footer_button({"inline_keyboard": [[
-            {"text": "💎 Upgrade to VIP Now", "url": f"{RENDER_URL}/subscribe?uid={user.user_id}"}
-        ]]}), parse_mode="Markdown")
+            f"*You're missing out.* VIP users win 3x more."
+        ), reply_markup=upgrade_buttons(user.user_id), parse_mode="Markdown")
         return
 
-    send_message(chat_id, "🎫 Building your 20-match accumulator...\nThis takes ~30 seconds.")
+    send_message(chat_id, "🎫 Building your 20-match accumulator...\n~30 seconds.")
 
+    prefs = get_user_prefs(user)
     pool = sb_fetch_events(timeline_hours=72, page_size=100)
-    if not pool or len(pool) < 10:
-        pool = fetch_real_fixtures(days_ahead=0, limit=60)
-        if len(pool) < 10:
-            for i in range(1, 5):
-                extra = fetch_real_fixtures(days_ahead=i, limit=60)
-                exist = {f"{x['home']}-{x['away']}" for x in pool}
-                for ef in extra:
-                    if f"{ef['home']}-{ef['away']}" not in exist:
-                        pool.append(ef)
-                if len(pool) >= 40:
-                    break
+    if not pool or len(pool) < 15:
+        pool = fetch_all_fixtures(limit=80, preferred=prefs or None)
 
-    if len(pool) < 8:
-        send_message(chat_id, f"Not enough fixtures ({len(pool)}). Try later.",
+    if len(pool) < 10:
+        send_message(chat_id, "Not enough fixtures right now. Try later.",
                      reply_markup=add_footer_button())
         return
 
     selected = build_accumulator(pool, target_matches=20)
     if len(selected) < 5:
-        send_message(chat_id, "Could not build a safe accumulator today. Try later.",
+        send_message(chat_id, "Couldn't build safe accumulator today. Try later.",
                      reply_markup=add_footer_button())
         return
 
     msg_parts = [
-        "🎫 *YOUR 20-MATCH ACCUMULATOR*",
+        f"🎫 *YOUR 20-MATCH ACCUMULATOR*",
         f"📅 {datetime.now().strftime('%d %b %Y')}",
-        "",
     ]
+    if prefs:
+        labels = " · ".join(REGIONS[k]["emoji"] + " " + REGIONS[k]["label"].split()[-1] for k in prefs)
+        msg_parts.append(f"🎯 Personalized: {labels}")
+    msg_parts.append("")
 
-    total_odds = 1.0
-    sb_selections = []
-    sendable_picks = []
-
+    total_odds = 1.0; sb_sel = []; picks = []
     for i, item in enumerate(selected, 1):
-        f = item["fixture"]
-        pick = item["pick"]
-        total_odds *= float(pick["odds"])
-        sa = stake_advice(pick["conf"])
-
+        f = item["fixture"]; pk = item["pick"]
+        total_odds *= float(pk["odds"])
+        sa = stake_advice(pk["conf"])
         msg_parts.append(
             f"{i}. *{f['home']} vs {f['away']}*\n"
             f"   🏆 {f.get('league','')} · {f.get('time','')}\n"
-            f"   ✅ {pick['pick']} @ {pick['odds']} ({pick['conf']}%)\n"
+            f"   ✅ {pk['pick']} @ {pk['odds']} ({pk['conf']}%)\n"
             f"   💰 Stake: {sa['percent']}%"
         )
-
         if f.get("eventId"):
-            sel = market_to_sb_selection(pick, f["eventId"])
-            if sel:
-                sb_selections.append(sel)
-
-        sendable_picks.append({
-            "match": f"{f['home']} vs {f['away']}",
-            "league": f.get("league", ""),
-            "pick": pick["pick"], "odds": pick["odds"], "conf": pick["conf"],
-        })
+            sel = market_to_sb_selection(pk, f["eventId"])
+            if sel: sb_sel.append(sel)
+        picks.append({"match":f"{f['home']} vs {f['away']}","league":f.get("league",""),
+                      "pick":pk["pick"],"odds":pk["odds"],"conf":pk["conf"]})
 
     total_odds = round(total_odds, 2)
-    potential_win = round(total_odds * 1000, 2)
+    win = round(total_odds * 1000, 2)
 
     msg_parts.append("")
     msg_parts.append(f"📊 *TOTAL ODDS:* {total_odds}")
-    msg_parts.append(f"💰 N1,000 → N{potential_win:,.0f}")
+    msg_parts.append(f"💰 N1,000 → N{win:,.0f}")
     msg_parts.append("")
 
-    sb_code = None
-    sb_url = None
-    fb_code = None
-
-    if sb_selections and len(sb_selections) >= 2:
-        booking = sb_book_bet(sb_selections[:20])
+    sb_code = sb_url = fb_code = None
+    if sb_sel and len(sb_sel) >= 2:
+        booking = sb_book_bet(sb_sel[:20])
         if booking and booking.get("shareCode"):
             sb_code = booking["shareCode"]
             sb_url = booking.get("shareURL") or sportybet_load_url(sb_code)
-
     if sb_code:
         fb_code = convert_sb_to_football(sb_code)
 
     msg_parts.append("🎟 *LOAD YOUR BETSLIP INSTANTLY*")
     msg_parts.append("━━━━━━━━━━━━━━━━━━━━━━")
-
     if sb_code:
-        msg_parts.append(
-            f"🟢 *SPORTYBET*\n"
-            f"   Code: `{sb_code}`\n"
-            f"   👉 {sb_url}"
-        )
+        msg_parts.append(f"🟢 *SPORTYBET*\n   Code: `{sb_code}`\n   👉 {sb_url}")
     else:
-        msg_parts.append("🟢 SPORTYBET: code unavailable — use list above manually")
-
+        msg_parts.append("🟢 SPORTYBET: code unavailable — use list above")
     if fb_code:
-        msg_parts.append(
-            f"\n🔵 *FOOTBALL.COM*\n"
-            f"   Code: `{fb_code}`\n"
-            f"   👉 {football_com_load_url(fb_code)}"
-        )
+        msg_parts.append(f"\n🔵 *FOOTBALL.COM*\n   Code: `{fb_code}`\n   👉 {football_com_load_url(fb_code)}")
     elif sb_code:
-        msg_parts.append(
-            f"\n🔵 *FOOTBALL.COM*\n"
-            f"   Convert `{sb_code}` at:\n"
-            f"   https://betrelay.com.ng/sportybet-to-football"
-        )
-    else:
-        msg_parts.append(f"\n🔵 FOOTBALL.COM: https://www.football.com/en-ng/sports")
-
-    msg_parts.append(
-        f"\n🟡 *BETKING*\n"
-        f"   👉 {betking_load_url()}\n"
-        f"   (Copy picks from list above)"
-    )
-    msg_parts.append(
-        f"\n🔴 *1XBET*\n"
-        f"   👉 {onexbet_load_url()}"
-    )
-
-    msg_parts.append("")
-    msg_parts.append("⚠️ High-odds accumulator. Bet responsibly. 18+")
+        msg_parts.append(f"\n🔵 *FOOTBALL.COM*\n   Convert `{sb_code}` at:\n   https://betrelay.com.ng/sportybet-to-football")
+    msg_parts.append(f"\n🟡 *BETKING*\n   👉 https://www.betking.com/sports")
+    msg_parts.append(f"\n🔴 *1XBET*\n   👉 https://1xbet.ng/en/line/football")
+    msg_parts.append("\n⚠️ High-odds accumulator. Bet responsibly. 18+")
 
     full_msg = "\n".join(msg_parts)
-
-    # Build footer with quick bookmaker buttons + main menu
-    footer_kb = {"inline_keyboard": []}
+    footer_kb = {"inline_keyboard":[]}
     if sb_url:
-        footer_kb["inline_keyboard"].append([
-            {"text": "🟢 Load on SportyBet", "url": sb_url}
-        ])
+        footer_kb["inline_keyboard"].append([{"text":"🟢 Load on SportyBet","url":sb_url}])
     if fb_code:
-        footer_kb["inline_keyboard"].append([
-            {"text": "🔵 Load on Football.com", "url": football_com_load_url(fb_code)}
-        ])
-    footer_kb["inline_keyboard"].append([
-        {"text": "🟡 BetKing", "url": betking_load_url()},
-        {"text": "🔴 1xBet", "url": onexbet_load_url()},
-    ])
+        footer_kb["inline_keyboard"].append([{"text":"🔵 Load on Football.com","url":football_com_load_url(fb_code)}])
+    footer_kb["inline_keyboard"].append([{"text":"🟡 BetKing","url":"https://www.betking.com/sports"},
+                                          {"text":"🔴 1xBet","url":"https://1xbet.ng/en/line/football"}])
     add_footer_button(footer_kb)
 
     if len(full_msg) > 3500:
-        # Split: send the picks, then a separate message with codes + buttons
         idx = full_msg.find("🎟 *LOAD YOUR BETSLIP INSTANTLY*")
         if idx > 0:
-            body = full_msg[:idx].strip()
-            codes = full_msg[idx:].strip()
-            send_message(chat_id, body, parse_mode="Markdown")
-            time.sleep(0.6)
-            send_message(chat_id, codes, reply_markup=footer_kb, parse_mode="Markdown")
+            send_message(chat_id, full_msg[:idx].strip(), parse_mode="Markdown")
+            time.sleep(0.5)
+            send_message(chat_id, full_msg[idx:].strip(),
+                         reply_markup=footer_kb, parse_mode="Markdown")
         else:
             send_message(chat_id, full_msg, reply_markup=footer_kb, parse_mode="Markdown")
     else:
         send_message(chat_id, full_msg, reply_markup=footer_kb, parse_mode="Markdown")
 
     try:
-        for sp in sendable_picks:
-            db.add(Prediction(
-                user_id=user.user_id, match=sp["match"], league=sp["league"],
-                market="ACCUMULATOR", pick=sp["pick"], odds=sp["odds"],
-                confidence=sp["conf"], match_date=str(date.today()),
-            ))
+        for sp in picks:
+            db.add(Prediction(user_id=user.user_id, match=sp["match"], league=sp["league"],
+                              market="ACCUMULATOR", pick=sp["pick"], odds=sp["odds"],
+                              confidence=sp["conf"], match_date=str(date.today())))
         db.commit()
-    except Exception as e:
-        print(f"Acca log error: {e}")
+    except: pass
+
+
+# ──────────────────────────────────────────────
+# N1M HANDLER
+# ──────────────────────────────────────────────
+def handle_n1m(chat_id, user, db):
+    admin = is_admin(user.user_id)
+    if not user.is_vip and not admin:
+        send_message(chat_id, (
+            f"🚀 *N1M Challenge — VIP Only*\n\n"
+            f"Turn ₦1,000 into ₦1,000,000 with one accumulator.\n\n"
+            f"*This is the highest-paying feature in the bot.*"
+        ), reply_markup=upgrade_buttons(user.user_id), parse_mode="Markdown")
+        return
+    send_message(chat_id, "🚀 Building your N1M slip...", reply_markup=get_main_keyboard(admin))
+    prefs = get_user_prefs(user)
+    pool = sb_fetch_events(timeline_hours=72) or fetch_all_fixtures(limit=80, preferred=prefs or None)
+    if len(pool) < 8:
+        send_message(chat_id, f"Not enough fixtures ({len(pool)}).",
+                     reply_markup=add_footer_button())
+        return
+    selected = build_accumulator(pool, target_matches=20)
+    picks = []; total_odds = 1.0
+    for item in selected:
+        f = item["fixture"]; p = item["pick"]
+        total_odds *= float(p["odds"])
+        picks.append({"match":f"{f['home']} vs {f['away']}","pick":p["pick"],
+                      "odds":p["odds"],"conf":p["conf"]})
+    total_odds = round(total_odds, 2)
+    win = round(1000 * total_odds, 2)
+    user.n1m_bankroll = 1000
+    if win > (user.n1m_best or 0): user.n1m_best = win
+    db.commit()
+    msg = (f"🚀 *N1M CHALLENGE*\n\n"
+           f"💰 Stake: N1,000\n🎯 Target: N1,000,000\n"
+           f"📊 Odds: {total_odds}\n💵 Potential: N{win:,.0f}\n\n")
+    for i, p in enumerate(picks[:20], 1):
+        msg += f"{i}. {p['match']}\n   {p['pick']} @ {p['odds']} ({p['conf']}%)\n"
+    msg += f"\n⚠️ High-risk. Bet responsibly."
+    send_message(chat_id, msg, reply_markup=add_footer_button(), parse_mode="Markdown")
 
 
 # ──────────────────────────────────────────────
@@ -1581,19 +1448,18 @@ def handle_accumulator(chat_id, user, db):
 def handle_admin_panel(chat_id, user):
     db = SessionLocal()
     try:
-        total_users = db.query(User).count()
-        total_vip = db.query(User).filter(User.is_vip == True).count()
-        total_preds = db.query(Prediction).count()
-    except Exception:
-        total_users = total_vip = total_preds = 0
-    finally:
-        db.close()
+        tu = db.query(User).count()
+        tv = db.query(User).filter(User.is_vip == True).count()
+        tp = db.query(Prediction).count()
+    except: tu = tv = tp = 0
+    finally: db.close()
     send_message(chat_id, (
         f"🔐 *ADMIN PANEL*\n━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"Users: {total_users} (VIP: {total_vip})\n"
-        f"Predictions: {total_preds}\n"
-        f"Brain: {len(HISTORICAL_STATS)} teams · H2H {len(H2H_CACHE)}\n"
-        f"SportyBet cache: {len(SB_EVENTS_CACHE.get('data', []))}\n\n"
+        f"👥 Users: {tu} (💎 VIP: {tv})\n"
+        f"📈 Predictions: {tp}\n"
+        f"🧠 Brain: {len(HISTORICAL_STATS)} teams\n"
+        f"🎫 SportyBet cache: {len(SB_EVENTS_CACHE.get('data',[]))}\n\n"
+        f"*Commands:*\n"
         f"/admin_stats /admin_users /admin_user `<uid>`\n"
         f"/admin_grant `<uid>` `<plan>` /admin_revoke `<uid>`\n"
         f"/admin_broadcast `<msg>` /admin_channels\n\n"
@@ -1604,52 +1470,41 @@ def handle_admin_panel(chat_id, user):
 def handle_admin_stats(chat_id):
     db = SessionLocal()
     try:
-        total_users = db.query(User).count()
-        total_vip = db.query(User).filter(User.is_vip == True).count()
-        total_preds = db.query(Prediction).count()
-        week_ago = datetime.utcnow() - timedelta(days=7)
-        new_this_week = db.query(User).filter(User.created_at >= week_ago).count()
-        top_pred = db.query(User).order_by(User.total_predictions.desc()).first()
-        top_ref = db.query(User).order_by(User.referral_count.desc()).first()
-        msg = (f"📊 *GLOBAL STATS*\n\n"
-               f"Users: {total_users} (VIP: {total_vip})\n"
-               f"New (7d): {new_this_week}\n"
-               f"Predictions: {total_preds}\n"
-               f"Brain teams: {len(HISTORICAL_STATS)}\n")
-        if top_pred:
-            msg += f"\nTop: {top_pred.first_name or top_pred.user_id} ({top_pred.total_predictions})"
-        if top_ref:
-            msg += f"\nTop ref: {top_ref.first_name or top_ref.user_id} ({top_ref.referral_count})"
-        send_message(chat_id, msg, reply_markup=add_footer_button(), parse_mode="Markdown")
-    except Exception as e:
-        send_message(chat_id, f"Error: {e}", reply_markup=add_footer_button())
-    finally:
-        db.close()
+        tu = db.query(User).count()
+        tv = db.query(User).filter(User.is_vip == True).count()
+        tp = db.query(Prediction).count()
+        wa = datetime.utcnow() - timedelta(days=7)
+        nw = db.query(User).filter(User.created_at >= wa).count()
+        send_message(chat_id, (
+            f"📊 *GLOBAL STATS*\n\n"
+            f"Users: {tu} (VIP: {tv})\n"
+            f"New (7d): {nw}\n"
+            f"Predictions: {tp}\n"
+            f"Brain: {len(HISTORICAL_STATS)} teams"
+        ), reply_markup=add_footer_button(), parse_mode="Markdown")
+    except Exception as e: send_message(chat_id, f"Error: {e}")
+    finally: db.close()
 
 
 def handle_admin_users(chat_id, page=0):
     db = SessionLocal()
     try:
         users = db.query(User).order_by(User.last_seen.desc())\
-            .offset(page * 20).limit(20).all()
+            .offset(page*20).limit(20).all()
         if not users:
-            send_message(chat_id, "No users.", reply_markup=add_footer_button())
-            return
+            send_message(chat_id, "No users.", reply_markup=add_footer_button()); return
         msg = f"👥 *USERS (page {page+1})*\n\n"
         for u in users:
             tier = "💎" if u.is_vip else "🆓"
             name = (u.first_name or u.username or f"User{u.user_id}")[:20]
-            msg += f"{tier} {name} · ID:`{u.user_id}` · {u.daily_count}/day\n"
+            msg += f"{tier} {name} · `{u.user_id}` · {u.daily_count}/day\n"
         kb = {"inline_keyboard": [[
-            {"text": "⬅️ Prev", "callback_data": f"admin_users_{max(0,page-1)}"},
-            {"text": "Next ➡️", "callback_data": f"admin_users_{page+1}"},
-        ]]}
+            {"text":"⬅️ Prev","callback_data":f"admin_users_{max(0,page-1)}"},
+            {"text":"Next ➡️","callback_data":f"admin_users_{page+1}"}]]}
         add_footer_button(kb)
         send_message(chat_id, msg, reply_markup=kb, parse_mode="Markdown")
-    except Exception as e:
-        send_message(chat_id, f"Error: {e}", reply_markup=add_footer_button())
-    finally:
-        db.close()
+    except Exception as e: send_message(chat_id, f"Error: {e}")
+    finally: db.close()
 
 
 def handle_admin_user_lookup(chat_id, uid):
@@ -1657,8 +1512,8 @@ def handle_admin_user_lookup(chat_id, uid):
     try:
         u = db.query(User).filter(User.user_id == uid).first()
         if not u:
-            send_message(chat_id, f"❌ {uid} not found.", reply_markup=add_footer_button())
-            return
+            send_message(chat_id, f"❌ {uid} not found.", reply_markup=add_footer_button()); return
+        prefs = get_user_prefs(u)
         send_message(chat_id, (
             f"🔍 *USER {uid}*\n\n"
             f"Name: {u.first_name or '—'}\n"
@@ -1666,200 +1521,179 @@ def handle_admin_user_lookup(chat_id, uid):
             f"Tier: {'VIP' if u.is_vip else 'FREE'}\n"
             f"VIP until: {u.vip_expiry or '—'}\n"
             f"Predictions: {u.total_predictions or 0}\n"
-            f"Referrals: {u.referral_count or 0}"
+            f"Referrals: {u.referral_count or 0}\n"
+            f"Prefs: {', '.join(prefs) if prefs else '—'}"
         ), reply_markup=add_footer_button(), parse_mode="Markdown")
-    except Exception as e:
-        send_message(chat_id, f"Error: {e}")
-    finally:
-        db.close()
+    except Exception as e: send_message(chat_id, f"Error: {e}")
+    finally: db.close()
 
 
 def handle_admin_grant(chat_id, uid, plan):
-    if plan not in ("daily", "weekly", "monthly"):
-        send_message(chat_id, f"❌ Invalid plan: {plan}", reply_markup=add_footer_button())
-        return
+    if plan not in ("daily","weekly","monthly"):
+        send_message(chat_id, f"❌ Invalid plan: {plan}", reply_markup=add_footer_button()); return
     if activate_vip(uid, plan, silent=False):
         send_message(chat_id, f"✅ Granted {plan} to {uid}", reply_markup=add_footer_button())
-    else:
-        send_message(chat_id, f"❌ Failed", reply_markup=add_footer_button())
+    else: send_message(chat_id, f"❌ Failed", reply_markup=add_footer_button())
 
 
 def handle_admin_revoke(chat_id, uid):
     if revoke_vip(uid):
         send_message(chat_id, f"✅ Revoked {uid}", reply_markup=add_footer_button())
-    else:
-        send_message(chat_id, f"❌ Failed", reply_markup=add_footer_button())
+    else: send_message(chat_id, f"❌ Failed", reply_markup=add_footer_button())
 
 
 def handle_admin_broadcast(chat_id, message):
     db = SessionLocal()
-    try:
-        users = db.query(User).all()
-    finally:
-        db.close()
+    try: users = db.query(User).all()
+    finally: db.close()
     send_message(chat_id, f"📢 Broadcasting to {len(users)}...")
     sent = 0
     for u in users:
         try:
             r = send_message(u.user_id, f"📢 *ANNOUNCEMENT*\n\n{message}", parse_mode="Markdown")
-            if r and r.get("ok"):
-                sent += 1
+            if r and r.get("ok"): sent += 1
             time.sleep(0.05)
-        except Exception:
-            pass
+        except: pass
     send_message(chat_id, f"✅ Sent to {sent}/{len(users)}", reply_markup=add_footer_button())
 
 
 def handle_admin_test_channel(chat_id):
     if not CHANNEL_ID:
-        send_message(chat_id, "❌ CHANNEL_ID not set.", reply_markup=add_footer_button())
-        return
+        send_message(chat_id, "❌ CHANNEL_ID not set.", reply_markup=add_footer_button()); return
     r = send_message(CHANNEL_ID, f"🧪 Test\n{BOT_LINK}")
     send_message(chat_id, f"Sent: {bool(r and r.get('ok'))}", reply_markup=add_footer_button())
 
 
 # ──────────────────────────────────────────────
-# N1M HANDLER
+# PREFERENCES HANDLERS
 # ──────────────────────────────────────────────
-def handle_n1m(chat_id, user, db):
-    kb = get_main_keyboard(is_admin(user.user_id))
-    if not user.is_vip and not is_admin(user.user_id):
-        send_message(chat_id,
-                     f"🚀 *N1M Challenge — VIP Only*\n\n👉 {RENDER_URL}/subscribe?uid={user.user_id}",
-                     reply_markup=add_footer_button({"inline_keyboard": [[
-                         {"text": "💎 Upgrade to VIP Now",
-                          "url": f"{RENDER_URL}/subscribe?uid={user.user_id}"}
-                     ]]}), parse_mode="Markdown")
-        return
-    send_message(chat_id, "🚀 Building your N1M slip...", reply_markup=kb)
-    pool = sb_fetch_events(timeline_hours=72) or fetch_real_fixtures(days_ahead=0, limit=40)
-    if len(pool) < 8:
-        for i in range(1, 5):
-            extra = fetch_real_fixtures(days_ahead=i, limit=40)
-            exist = {f"{x['home']}-{x['away']}" for x in pool}
-            for ef in extra:
-                if f"{ef['home']}-{ef['away']}" not in exist:
-                    pool.append(ef)
-            if len(pool) >= 20:
-                break
-    if len(pool) < 8:
-        send_message(chat_id, f"Not enough fixtures ({len(pool)}).",
-                     reply_markup=add_footer_button())
-        return
+def handle_preferences_menu(chat_id, user, db, edit_msg_id=None):
+    text = get_preferences_intro_text(user)
+    kb = get_preference_keyboard(user)
+    if edit_msg_id:
+        try:
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                json={"chat_id":chat_id,"message_id":edit_msg_id,
+                      "text":text,"reply_markup":kb,"parse_mode":"Markdown"}, timeout=15)
+            return
+        except: pass
+    send_message(chat_id, text, reply_markup=kb, parse_mode="Markdown")
 
-    selected = build_accumulator(pool, target_matches=20)
-    picks = []
-    total_odds = 1.0
-    for item in selected:
-        f = item["fixture"]; p = item["pick"]
-        total_odds *= float(p["odds"])
-        picks.append({"match": f"{f['home']} vs {f['away']}", "pick": p["pick"],
-                      "odds": p["odds"], "conf": p["conf"]})
 
-    total_odds = round(total_odds, 2)
-    pot_win = round(1000 * total_odds, 2)
-    user.n1m_bankroll = 1000
-    if pot_win > (user.n1m_best or 0):
-        user.n1m_best = pot_win
+def handle_pref_toggle(chat_id, user, db, region_key, msg_id=None):
+    if region_key not in REGIONS: return
+    prefs = get_user_prefs(user)
+    if region_key in prefs:
+        prefs.remove(region_key)
+    else:
+        if len(prefs) >= MAX_PREFERENCES:
+            send_message(chat_id, f"⚠️ Max {MAX_PREFERENCES} preferences. Deselect one first.")
+            # Re-show current
+            handle_preferences_menu(chat_id, user, db, edit_msg_id=msg_id)
+            return
+        prefs.append(region_key)
+    user.preferred_regions = ",".join(prefs)
     db.commit()
+    # Refresh UI
+    text = get_preferences_intro_text(user)
+    kb = get_preference_keyboard(user)
+    if msg_id:
+        try:
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                json={"chat_id":chat_id,"message_id":msg_id,
+                      "text":text,"reply_markup":kb,"parse_mode":"Markdown"}, timeout=15)
+            return
+        except: pass
+    send_message(chat_id, text, reply_markup=kb, parse_mode="Markdown")
 
-    msg = (f"🚀 *N1M CHALLENGE*\n\n"
-           f"💰 Stake: N1,000\n🎯 Target: N1,000,000\n"
-           f"📊 Total odds: {total_odds}\n💵 Potential: N{pot_win:,.0f}\n\n")
-    for i, p in enumerate(picks[:20], 1):
-        msg += f"{i}. {p['match']}\n   {p['pick']} @ {p['odds']} ({p['conf']}%)\n"
-    msg += f"\n⚠️ High-risk. Bet responsibly."
-    send_message(chat_id, msg, reply_markup=add_footer_button(), parse_mode="Markdown")
+
+def handle_pref_reset(chat_id, user, db, msg_id=None):
+    user.preferred_regions = ""
+    user.preferences_set = False
+    db.commit()
+    text = get_preferences_intro_text(user)
+    kb = get_preference_keyboard(user)
+    if msg_id:
+        try:
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                json={"chat_id":chat_id,"message_id":msg_id,
+                      "text":text,"reply_markup":kb,"parse_mode":"Markdown"}, timeout=15)
+            return
+        except: pass
+    send_message(chat_id, text, reply_markup=kb, parse_mode="Markdown")
+
+
+def handle_pref_confirm(chat_id, user, db, msg_id=None):
+    prefs = get_user_prefs(user)
+    if not prefs:
+        send_message(chat_id, "⚠️ Please select at least 1 region.")
+        return
+    user.preferences_set = True
+    db.commit()
+    labels = ", ".join(REGIONS[k]["label"] for k in prefs)
+    conf_text = (
+        f"✅ *PREFERENCES SAVED!*\n\n"
+        f"Your betting preferences:\n{labels}\n\n"
+        f"🎯 Your daily picks and accumulators will now be personalized.\n"
+        f"📬 You'll get a daily push at *09:00 WAT* with picks from your regions.\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👇 *Now let's find you some winners*"
+    )
+    if msg_id:
+        try:
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                json={"chat_id":chat_id,"message_id":msg_id,"text":conf_text,
+                      "reply_markup":get_inline_menu(is_admin(user.user_id)),
+                      "parse_mode":"Markdown"}, timeout=15)
+            return
+        except: pass
+    send_message(chat_id, conf_text, reply_markup=get_inline_menu(is_admin(user.user_id)),
+                 parse_mode="Markdown")
 
 
 # ──────────────────────────────────────────────
-# BUTTON ROUTER
+# MENU CALLBACKS
 # ──────────────────────────────────────────────
-def map_button_to_command(text, admin):
-    low = text.strip().lower()
-    if "today" in low and "fixture" in low:
-        return "/today"
-    if "n1m" in low or "challenge" in low:
-        return "/million"
-    if "european" in low:
-        return "/europeanleagues"
-    if "asian" in low:
-        return "/asianleagues"
-    if "american" in low:
-        return "/americanleagues"
-    if "accumulator" in low:
-        return "/accumulator"
-    if admin and "admin" in low and "panel" in low:
-        return "/admin"
-    return None
-
-
-# ──────────────────────────────────────────────
-# CALLBACK HANDLER (menu actions)
-# ──────────────────────────────────────────────
-def handle_menu_callback(chat_id, user, db, action):
-    """Route menu_* inline button callbacks."""
+def handle_menu_callback(chat_id, user, db, action, msg_id=None):
     if action == "menu_main":
         send_main_menu(chat_id, user, db)
     elif action == "menu_today":
-        # Reuse today logic
-        if not is_admin(user.user_id) and user.daily_count >= (10 if user.is_vip else 2):
-            send_message(chat_id, f"🚫 Daily limit reached.",
-                         reply_markup=add_footer_button())
-            return
-        send_message(chat_id, "🔎 Scanning today's fixtures...",
-                     reply_markup=get_main_keyboard(is_admin(user.user_id)))
-        fixtures = fetch_real_fixtures(days_ahead=0, limit=10)
-        if not fixtures:
-            send_message(chat_id, f"No fixtures today.\n{BOT_LINK}",
-                         reply_markup=add_footer_button())
-            return
-        scored = [(f, score_fixture_for_user(f, user)) for f in fixtures]
-        scored.sort(key=lambda x: x[1], reverse=True)
-        fixtures = [f for f, _ in scored][:10]
-        msg_txt = f"⚽ *TOP FIXTURES — {fixtures[0].get('date', 'Today')}*\n\n"
-        for i, f in enumerate(fixtures, 1):
-            star = "⭐ " if score_fixture_for_user(f, user) >= 50 else ""
-            msg_txt += (f"{i}. {star}{f['home']} vs {f['away']}\n"
-                        f"   🏆 {f.get('league','')} · {f.get('time','')}\n\n")
-        inline_kb = add_footer_button({"inline_keyboard": [
-            [{"text": "🧠 Analyze Top 5 Matches", "callback_data": "predict_top5"}],
-            [{"text": "🎫 20-Match Accumulator", "callback_data": "build_accumulator"}],
-        ]})
-        send_message(chat_id, msg_txt, reply_markup=inline_kb, parse_mode="Markdown")
+        handle_region(chat_id, user, db, "europe", min_fixtures=15)
     elif action == "menu_stats":
-        stats = get_user_stats(db, user.user_id)
+        total = user.total_predictions or 0
+        wins = user.total_wins or 0
+        losses = user.total_losses or 0
+        wr = round(wins/total*100,1) if total>0 else 0
         admin_line = "\n🔐 ADMIN" if is_admin(user.user_id) else ""
         send_message(chat_id, (
             f"📊 *Your Stats*{admin_line}\n\n"
-            f"🔥 Streak: {stats['streak']} (best {stats['best_streak']})\n"
-            f"🎯 Predictions: {stats['total']}\n"
-            f"✅ {stats['wins']}W / ❌ {stats['losses']}L\n"
-            f"📈 Win rate: {stats['win_rate']}%\n\n"
-            f"💰 Bankroll: N{stats['bankroll']:.0f}\n"
-            f"🎁 Referrals: {stats['referrals']}\n"
-            f"🚀 N1M: N{stats['n1m_bankroll']:.0f}"
+            f"🔥 Streak: {user.streak} (best {user.best_streak})\n"
+            f"🎯 Predictions: {total}\n"
+            f"✅ {wins}W / ❌ {losses}L\n"
+            f"📈 Win rate: {wr}%\n\n"
+            f"💰 Bankroll: N{user.bankroll:.0f}\n"
+            f"🎁 Referrals: {user.referral_count or 0}\n"
+            f"🚀 N1M: N{user.n1m_bankroll:.0f}"
         ), reply_markup=add_footer_button(), parse_mode="Markdown")
     elif action == "menu_leaderboard":
         try:
             top = db.query(User).filter(User.total_predictions >= 5)\
                 .order_by(User.total_wins.desc()).limit(10).all()
-        except Exception:
-            top = []
-        msg_txt = "🏆 *Leaderboard — Top Predictors*\n\n"
-        if not top:
-            msg_txt += "No stats yet. Be the first!"
+        except: top = []
+        msg = "🏆 *Leaderboard*\n\n"
+        if not top: msg += "No stats yet. Be the first!"
         else:
             for i, u in enumerate(top, 1):
-                medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
+                medal = ["🥇","🥈","🥉"][i-1] if i<=3 else f"{i}."
                 name = u.first_name or u.username or f"User{u.user_id}"
-                rate = round(u.total_wins / max(u.total_predictions, 1) * 100, 0)
-                msg_txt += f"{medal} {name} — {u.total_wins}W · {rate:.0f}%\n"
-        send_message(chat_id, msg_txt, reply_markup=add_footer_button(), parse_mode="Markdown")
+                rate = round(u.total_wins/max(u.total_predictions,1)*100,0)
+                msg += f"{medal} {name} — {u.total_wins}W · {rate:.0f}%\n"
+        send_message(chat_id, msg, reply_markup=add_footer_button(), parse_mode="Markdown")
     elif action == "menu_profile":
-        stats = get_user_stats(db, user.user_id)
         tier = "🔐 ADMIN" if is_admin(user.user_id) else ("💎 VIP" if user.is_vip else "🆓 FREE")
         exp = user.vip_expiry if user.is_vip else "—"
+        prefs = get_user_prefs(user)
+        plabels = ", ".join(REGIONS[k]["label"] for k in prefs) if prefs else "Not set"
         limit = 999 if is_admin(user.user_id) else (10 if user.is_vip else 2)
         send_message(chat_id, (
             f"👤 *Your Profile*\n\n"
@@ -1867,54 +1701,67 @@ def handle_menu_callback(chat_id, user, db, action):
             f"Tier: {tier}\n"
             f"VIP until: {exp}\n"
             f"Daily used: {user.daily_count}/{limit}\n\n"
-            f"📊 Streak {stats['streak']} · {stats['win_rate']}% win rate\n"
+            f"⚙️ Preferences: {plabels}\n"
             f"⭐ Fav leagues: {user.fav_leagues or 'None yet'}"
         ), reply_markup=add_footer_button(), parse_mode="Markdown")
+    elif action == "menu_prefs":
+        handle_preferences_menu(chat_id, user, db)
     elif action == "menu_refer":
         ref_link = f"https://t.me/Betmasterpro_bot?start=ref_{user.referral_code}"
         send_message(chat_id, (
             f"🎁 *Refer Friends, Earn VIP*\n\n"
-            f"*Your link:*\n`{ref_link}`\n\n"
+            f"Your link:\n`{ref_link}`\n\n"
             f"✅ You get 7 free VIP days per paying referral\n"
             f"✅ They get 20% off their first month\n\n"
-            f"Referrals so far: {user.referral_count or 0}"
-        ), reply_markup=add_footer_button({"inline_keyboard": [[
-            {"text": "📤 Share Link",
-             "url": f"https://t.me/share/url?url={ref_link}&text=Join%20BetMaster%20Pro"}
-        ]]}), parse_mode="Markdown")
+            f"Referrals: {user.referral_count or 0}"
+        ), reply_markup=add_footer_button({"inline_keyboard":[[
+            {"text":"📤 Share Link","url":f"https://t.me/share/url?url={ref_link}&text=Join%20BetMaster%20Pro"}]]}),
+        parse_mode="Markdown")
     elif action == "menu_upgrade":
         if is_admin(user.user_id):
-            send_message(chat_id, "🔐 ADMIN — full access already.",
-                         reply_markup=add_footer_button())
-            return
+            send_message(chat_id, "🔐 ADMIN — full access.", reply_markup=add_footer_button()); return
         send_message(chat_id, (
             f"💎 *VIP Benefits*\n\n"
             f"✅ 10 predictions/day (vs FREE 2)\n"
-            f"✅ 🎫 20-match Accumulator with real SportyBet + Football.com codes\n"
-            f"✅ 🚀 N1M Challenge\n"
+            f"✅ 🎫 20-match Accumulator — *personalized to your regions*\n"
+            f"✅ 🚀 N1M Challenge — ₦1,000 → ₦1,000,000\n"
             f"✅ Full 13-market probabilities\n"
-            f"✅ Value-bet alerts + bankroll advisor\n\n"
-            f"*Plans:*\n"
-            f"• Daily — N500\n• Weekly — N2,000\n• Monthly — N5,000\n"
-        ), reply_markup=add_footer_button({"inline_keyboard": [
-            [{"text": "💳 Pay Now — View Plans",
-              "url": f"{RENDER_URL}/subscribe?uid={user.user_id}"}]
-        ]}), parse_mode="Markdown")
+            f"✅ Value-bet alerts + bankroll advisor\n"
+            f"✅ Daily push notifications\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔥 *JOIN 5,000+ WINNING VIP MEMBERS*\n\n"
+            f"*Plans:*\n• Daily — ₦500\n• Weekly — ₦2,000\n• Monthly — ₦5,000"
+        ), reply_markup=upgrade_buttons(user.user_id), parse_mode="Markdown")
     elif action == "menu_help":
-        admin_line = ("\n🔐 *Admin:*\n/admin /admin_stats /admin_users\n"
+        admin_line = ("\n🔐 Admin:\n/admin /admin_stats /admin_users\n"
                       "/admin_grant /admin_revoke /admin_broadcast\n") if is_admin(user.user_id) else ""
         send_message(chat_id, (
-            f"📖 *BetMaster Pro Help*\n\n"
+            f"📖 *Help*\n\n"
             f"*VIP:* /accumulator /million\n"
-            f"*Fixtures:* /today /europeanleagues /asianleagues /americanleagues /national\n"
-            f"*Account:* /stats /leaderboard /refer /profile /upgrade\n"
-            f"{admin_line}\n"
-            f"FREE 2/day · VIP 10/day\n{BOT_LINK}"
+            f"*Leagues:* /europeanleagues /asianleagues /americanleagues /africanleagues /national\n"
+            f"*Account:* /stats /leaderboard /refer /profile /preferences /upgrade\n"
+            f"{admin_line}\nFREE 2/day · VIP 10/day\n{BOT_LINK}"
         ), reply_markup=add_footer_button(), parse_mode="Markdown")
     elif action == "menu_admin" and is_admin(user.user_id):
         handle_admin_panel(chat_id, user)
-    else:
-        send_main_menu(chat_id, user, db)
+
+
+# ──────────────────────────────────────────────
+# BUTTON TEXT ROUTER
+# ──────────────────────────────────────────────
+def map_button_to_command(text, admin):
+    low = text.strip().lower()
+    if "today" in low and "fixture" in low: return "/today"
+    if "n1m" in low or "challenge" in low: return "/million"
+    if "european" in low: return "/europeanleagues"
+    if "asian" in low: return "/asianleagues"
+    if "american" in low: return "/americanleagues"
+    if "african" in low: return "/africanleagues"
+    if "national" in low: return "/national"
+    if "accumulator" in low: return "/accumulator"
+    if "preference" in low: return "/preferences"
+    if admin and "admin" in low and "panel" in low: return "/admin"
+    return None
 
 
 # ──────────────────────────────────────────────
@@ -1924,67 +1771,79 @@ def process_update(upd):
     try:
         base = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-        # Callbacks
         if "callback_query" in upd:
             cq = upd["callback_query"]
             chat_id = cq["message"]["chat"]["id"]
+            msg_id = cq["message"].get("message_id")
             from_id = cq["from"]["id"]
             data = cq.get("data", "")
             admin = is_admin(from_id)
             requests.post(f"{base}/answerCallbackQuery",
-                          json={"callback_query_id": cq["id"], "text": "Working..."},
-                          timeout=5)
+                json={"callback_query_id":cq["id"],"text":"Working..."}, timeout=5)
 
             if data.startswith("admin_users_") and admin:
-                try:
-                    page = int(data.replace("admin_users_", ""))
-                except Exception:
-                    page = 0
-                handle_admin_users(chat_id, page)
-                return
+                try: page = int(data.replace("admin_users_",""))
+                except: page = 0
+                handle_admin_users(chat_id, page); return
 
             db2 = SessionLocal()
             try:
-                user2 = get_user(db2, from_id,
-                                 cq["from"].get("username", ""),
-                                 cq["from"].get("first_name", ""))
+                user2 = get_user(db2, from_id, cq["from"].get("username",""),
+                                 cq["from"].get("first_name",""))
 
-                # Menu callbacks first
-                if data.startswith("menu_"):
-                    handle_menu_callback(chat_id, user2, db2, data)
-                    return
+                # Preferences
+                if data.startswith("pref_toggle_"):
+                    key = data.replace("pref_toggle_","")
+                    handle_pref_toggle(chat_id, user2, db2, key, msg_id=msg_id); return
+                if data == "pref_reset":
+                    handle_pref_reset(chat_id, user2, db2, msg_id=msg_id); return
+                if data == "pref_confirm":
+                    handle_pref_confirm(chat_id, user2, db2, msg_id=msg_id); return
 
+                # Region-specific
                 if data.startswith("predict_"):
-                    region = data.replace("predict_", "")
-                    handle_analyze_top5(chat_id, user2, db2, region=region)
-                elif data == "predict_top5":
-                    handle_analyze_top5(chat_id, user2, db2, region=None)
-                elif data == "build_accumulator":
-                    handle_accumulator(chat_id, user2, db2)
-                elif data in ("n1m_challenge", "n1m_regen"):
-                    handle_n1m(chat_id, user2, db2)
-            finally:
-                db2.close()
+                    region_map = {"predict_europe":"europe","predict_asia":"asia",
+                                  "predict_america":"america","predict_africa":"africa",
+                                  "predict_national":"national","predict_top5":None}
+                    reg = region_map.get(data)
+                    if reg: handle_analyze_top10(chat_id, user2, db2, reg)
+                    else: handle_analyze_top10(chat_id, user2, db2, None)
+                    return
+                if data.startswith("analyze10_"):
+                    key = data.replace("analyze10_","")
+                    handle_analyze_top10(chat_id, user2, db2, key); return
+                if data.startswith("sure10_"):
+                    key = data.replace("sure10_","")
+                    handle_sure_10(chat_id, user2, db2, key); return
+                if data == "sure_10_all":
+                    handle_sure_10(chat_id, user2, db2, None); return
+                if data == "build_accumulator":
+                    handle_accumulator(chat_id, user2, db2); return
+                if data in ("n1m_challenge","n1m_regen"):
+                    handle_n1m(chat_id, user2, db2); return
+
+                # Menu
+                if data.startswith("menu_"):
+                    handle_menu_callback(chat_id, user2, db2, data, msg_id=msg_id); return
+            finally: db2.close()
             return
 
         # Messages
         msg = upd.get("message")
         if not msg or "text" not in msg or msg["chat"]["type"] != "private":
             return
-
         chat_id = msg["chat"]["id"]
         text = msg["text"].strip()
         user_id = msg["from"]["id"]
-        username = msg["from"].get("username", "")
-        first_name = msg["from"].get("first_name", "")
+        username = msg["from"].get("username","")
+        first_name = msg["from"].get("first_name","")
         low = text.lower()
         admin = is_admin(user_id)
         main_kb = get_main_keyboard(admin)
 
         mapped = map_button_to_command(text, admin)
         if mapped:
-            low = mapped.lower()
-            text = mapped
+            low = mapped.lower(); text = mapped
 
         db = SessionLocal()
         try:
@@ -1995,118 +1854,112 @@ def process_update(upd):
             # Admin routing
             if low.startswith("/admin") and admin:
                 parts = text.split(maxsplit=2)
-                subcmd = parts[0].lower()
-                if subcmd == "/admin" or low.strip() == "/admin":
-                    handle_admin_panel(chat_id, user)
-                elif subcmd == "/admin_stats":
-                    handle_admin_stats(chat_id)
-                elif subcmd == "/admin_users":
-                    handle_admin_users(chat_id, 0)
-                elif subcmd == "/admin_user" and len(parts) >= 2:
+                sub = parts[0].lower()
+                if sub == "/admin" or low.strip() == "/admin": handle_admin_panel(chat_id, user)
+                elif sub == "/admin_stats": handle_admin_stats(chat_id)
+                elif sub == "/admin_users": handle_admin_users(chat_id, 0)
+                elif sub == "/admin_user" and len(parts) >= 2:
                     try: handle_admin_user_lookup(chat_id, int(parts[1]))
-                    except Exception: send_message(chat_id, "Usage: /admin_user `<uid>`",
-                                                  reply_markup=add_footer_button(),
-                                                  parse_mode="Markdown")
-                elif subcmd == "/admin_grant" and len(parts) >= 3:
+                    except: send_message(chat_id, "Usage: /admin_user `<uid>`",
+                                         reply_markup=add_footer_button(), parse_mode="Markdown")
+                elif sub == "/admin_grant" and len(parts) >= 3:
                     try: handle_admin_grant(chat_id, int(parts[1]), parts[2].lower())
-                    except Exception: send_message(chat_id, "Usage: /admin_grant `<uid> <plan>`",
-                                                  reply_markup=add_footer_button(),
-                                                  parse_mode="Markdown")
-                elif subcmd == "/admin_revoke" and len(parts) >= 2:
+                    except: send_message(chat_id, "Usage: /admin_grant `<uid> <plan>`",
+                                         reply_markup=add_footer_button(), parse_mode="Markdown")
+                elif sub == "/admin_revoke" and len(parts) >= 2:
                     try: handle_admin_revoke(chat_id, int(parts[1]))
-                    except Exception: send_message(chat_id, "Usage: /admin_revoke `<uid>`",
-                                                  reply_markup=add_footer_button(),
-                                                  parse_mode="Markdown")
-                elif subcmd == "/admin_broadcast":
+                    except: send_message(chat_id, "Usage: /admin_revoke `<uid>`",
+                                         reply_markup=add_footer_button(), parse_mode="Markdown")
+                elif sub == "/admin_broadcast":
                     bmsg = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else ""
-                    if bmsg:
-                        threading.Thread(target=handle_admin_broadcast,
-                                         args=(chat_id, bmsg), daemon=True).start()
-                    else:
-                        send_message(chat_id, "Usage: /admin_broadcast `<msg>`",
-                                     reply_markup=add_footer_button(), parse_mode="Markdown")
-                elif subcmd == "/admin_channels":
-                    handle_admin_test_channel(chat_id)
-                else:
-                    send_message(chat_id, "Unknown admin cmd. Use /admin",
-                                 reply_markup=add_footer_button())
+                    if bmsg: threading.Thread(target=handle_admin_broadcast,
+                                              args=(chat_id, bmsg), daemon=True).start()
+                    else: send_message(chat_id, "Usage: /admin_broadcast `<msg>`",
+                                       reply_markup=add_footer_button(), parse_mode="Markdown")
+                elif sub == "/admin_channels": handle_admin_test_channel(chat_id)
+                else: send_message(chat_id, "Unknown admin cmd. /admin",
+                                   reply_markup=add_footer_button())
                 return
-
             if low.startswith("/admin"):
-                send_message(chat_id, "⛔ Admin access required.",
-                             reply_markup=add_footer_button())
+                send_message(chat_id, "⛔ Admin access required.", reply_markup=add_footer_button())
                 return
 
+            # Referral capture
             if low.startswith("/start") and "ref_" in low:
                 try:
-                    ref_code = text.split("ref_")[1].split()[0].strip()
-                    if ref_code and user.referred_by != ref_code:
-                        user.referred_by = ref_code
-                        db.commit()
-                except Exception:
-                    pass
+                    rc = text.split("ref_")[1].split()[0].strip()
+                    if rc and user.referred_by != rc: user.referred_by = rc; db.commit()
+                except: pass
+
+            # First-time users: force preferences first
+            if low.startswith("/start") and not user.preferences_set and not admin:
+                send_message(chat_id, (
+                    f"🏆 *WELCOME TO BETMASTER PRO!*\n\n"
+                    f"You're joining *5,000+ winners* who use AI to dominate the bookies.\n\n"
+                    f"🧠 Dixon-Coles AI engine · 13 markets\n"
+                    f"🌍 Africa · Asia · Europe · America · National\n"
+                    f"🎫 20-match Accumulator with real booking codes\n"
+                    f"🚀 N1M Challenge — ₦1,000 → ₦1,000,000\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"*First, let's set up your preferences.*\n"
+                    f"Pick up to *3 regions* you want predictions from."
+                ), parse_mode="Markdown")
+                time.sleep(0.5)
+                handle_preferences_menu(chat_id, user, db)
+                return
 
             if low.startswith("/start") or low.startswith("/menu"):
                 send_main_menu(chat_id, user, db)
+
+            elif low.startswith("/preferences"):
+                handle_preferences_menu(chat_id, user, db)
 
             elif low.startswith("/help"):
                 handle_menu_callback(chat_id, user, db, "menu_help")
 
             elif low.startswith("/europeanleagues"):
-                handle_region(chat_id, user_id, "european", user, db, cur)
+                handle_region(chat_id, user, db, "europe")
             elif low.startswith("/asianleagues"):
-                handle_region(chat_id, user_id, "asian", user, db, cur)
+                handle_region(chat_id, user, db, "asia")
             elif low.startswith("/americanleagues"):
-                handle_region(chat_id, user_id, "american", user, db, cur)
+                handle_region(chat_id, user, db, "america")
+            elif low.startswith("/africanleagues"):
+                handle_region(chat_id, user, db, "africa")
             elif low.startswith("/national"):
-                handle_region(chat_id, user_id, "national", user, db, cur)
+                handle_region(chat_id, user, db, "national")
 
             elif low.startswith("/accumulator"):
                 handle_accumulator(chat_id, user, db)
-
             elif low.startswith("/million") or low.startswith("/m1"):
                 handle_n1m(chat_id, user, db)
-
             elif low.startswith("/today"):
-                handle_menu_callback(chat_id, user, db, "menu_today")
-
+                handle_region(chat_id, user, db, "europe", min_fixtures=15)
             elif low.startswith("/betslip"):
                 if not user.is_vip and not admin:
                     send_message(chat_id, f"💎 VIP only.\n{RENDER_URL}/subscribe?uid={user_id}",
-                                 reply_markup=add_footer_button())
-                    return
+                                 reply_markup=upgrade_buttons(user_id)); return
                 handle_accumulator(chat_id, user, db)
-
             elif low.startswith("/stats"):
                 handle_menu_callback(chat_id, user, db, "menu_stats")
-
             elif low.startswith("/leaderboard"):
                 handle_menu_callback(chat_id, user, db, "menu_leaderboard")
-
             elif low.startswith("/refer"):
                 handle_menu_callback(chat_id, user, db, "menu_refer")
-
             elif low.startswith("/profile"):
                 handle_menu_callback(chat_id, user, db, "menu_profile")
-
             elif low.startswith("/upgrade"):
                 handle_menu_callback(chat_id, user, db, "menu_upgrade")
 
             elif " vs " in low and 5 < len(text) < 100:
                 if not admin and user.daily_count >= cur:
-                    send_message(chat_id, f"🚫 Limit {user.daily_count}/{cur}\n"
-                                          f"{RENDER_URL}/subscribe?uid={user_id}",
-                                 reply_markup=add_footer_button())
-                    return
+                    send_message(chat_id, f"🚫 Limit {user.daily_count}/{cur}",
+                                 reply_markup=upgrade_buttons(user_id)); return
                 try:
                     parts = re.split(r"\s+vs\s+", text, flags=re.IGNORECASE)
-                    home = parts[0].strip().title()
-                    away = parts[1].strip().title()
-                except Exception:
-                    send_message(chat_id, "Format: Team A vs Team B",
-                                 reply_markup=add_footer_button())
-                    return
-                all_f = fetch_real_fixtures(days_ahead=0, limit=100)
+                    home = parts[0].strip().title(); away = parts[1].strip().title()
+                except:
+                    send_message(chat_id, "Format: Team A vs Team B", reply_markup=add_footer_button()); return
+                all_f = fetch_all_fixtures(limit=100, preferred=get_user_prefs(user) or None)
                 matched = next((f for f in all_f
                                 if home.lower() in f["home"].lower()
                                 and away.lower() in f["away"].lower()), None)
@@ -2114,34 +1967,134 @@ def process_update(upd):
                     matched = next((f for f in all_f
                                     if away.lower() in f["home"].lower()
                                     and home.lower() in f["away"].lower()), None)
-                data = matched or {
-                    "home": home, "away": away, "league": "Custom",
-                    "date": datetime.now().strftime("%Y-%m-%d"),
-                    "odds_h": 0, "odds_d": 0, "odds_a": 0,
-                    "odds_over25": 0, "odds_btts": 0, "source": "Model",
-                }
+                data = matched or {"home":home,"away":away,"league":"Custom",
+                    "date":datetime.now().strftime("%Y-%m-%d"),
+                    "odds_h":0,"odds_d":0,"odds_a":0,"odds_over25":0,
+                    "odds_btts":0,"source":"Model"}
                 format_full_prediction(chat_id, data, show_all_markets=(user.is_vip or admin))
-                user.daily_count += 1
-                db.commit()
+                user.daily_count += 1; db.commit()
 
             else:
                 send_message(chat_id, f"Unknown command. /help\n{BOT_LINK}",
                              reply_markup=add_footer_button())
 
         except Exception as e:
-            print(f"Handler error: {e}")
-            traceback.print_exc()
-            db.rollback()
-        finally:
-            db.close()
-
+            print(f"Handler: {e}"); traceback.print_exc(); db.rollback()
+        finally: db.close()
     except Exception as outer:
-        print(f"Outer error: {outer}")
-        traceback.print_exc()
+        print(f"Outer: {outer}"); traceback.print_exc()
 
 
 # ──────────────────────────────────────────────
-# SCHEDULER
+# DAILY NOTIFICATION SCHEDULER
+# ──────────────────────────────────────────────
+def send_daily_notification(user, db):
+    """Send personalized daily picks based on user preferences."""
+    try:
+        prefs = get_user_prefs(user)
+        if not prefs:
+            # No prefs set — skip
+            return
+
+        admin = is_admin(user.user_id)
+        is_vip = user.is_vip or admin
+
+        # Fetch from user's preferred regions
+        pool = []
+        for k in prefs:
+            pool.extend(fetch_region_fixtures(k, limit=8))
+        if not pool:
+            return
+
+        # Rank
+        ranked = []
+        for f in pool[:30]:
+            try:
+                p = predict_match(f)
+                ranked.append((safety_score(f, p), f, p))
+            except: continue
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        if not ranked: return
+
+        visible = 5 if is_vip else 2
+        hidden = min(10, len(ranked)) - visible
+
+        # Header
+        pref_labels = " · ".join(REGIONS[k]["emoji"] for k in prefs)
+        greeting = "☀️ Good morning" if 5 <= datetime.utcnow().hour <= 11 else "🌙 Daily picks"
+        header = (
+            f"{greeting}, *{user.first_name or 'Trader'}!*\n"
+            f"📅 {datetime.now().strftime('%A %d %b')}\n"
+            f"🎯 Personalized for: {pref_labels}\n\n"
+            f"*Here are today's top picks from your preferred leagues*"
+        )
+        send_message(user.user_id, header, parse_mode="Markdown")
+
+        for i, (_, f, p) in enumerate(ranked[:visible], 1):
+            sa = stake_advice(p["confidence"])
+            msg = (
+                f"*#{i}. {f['home']} vs {f['away']}*\n"
+                f"🏆 {f.get('league','')} · {f.get('time','')} WAT\n"
+                f"✅ *{p['best_pick']}* @ *{p['odds']}*\n"
+                f"   🎯 {p['confidence']}% confidence"
+            )
+            if p.get("edge",0) > 0: msg += f" · +{p['edge']}% edge"
+            msg += f"\n   💰 Stake: {sa['percent']}% (N{sa['amount']})"
+            send_message(user.user_id, msg, parse_mode="Markdown")
+            time.sleep(0.4)
+
+        if not is_vip and hidden > 0:
+            send_upgrade_cta(user.user_id, user, hidden_count=hidden)
+        else:
+            send_message(user.user_id, "✅ Want more? Tap below 👇",
+                         reply_markup=get_inline_menu(admin))
+    except Exception as e:
+        print(f"[daily_notify] {e}")
+
+
+def daily_notification_loop():
+    """Background thread: send one notification per user per day."""
+    while True:
+        try:
+            now_wat = datetime.utcnow() + timedelta(hours=1)
+            # Send at 09:00 WAT
+            if now_wat.hour == 9 and now_wat.minute < 5:
+                today_str = str(date.today())
+                db = SessionLocal()
+                try:
+                    users = db.query(User).filter(
+                        User.preferences_set == True,
+                        User.daily_notify_enabled == True,
+                        User.is_banned == False,
+                    ).all()
+                finally: db.close()
+
+                sent = 0
+                for u in users:
+                    if u.notified_today == today_str: continue
+                    if not get_user_prefs(u): continue
+                    try:
+                        db2 = SessionLocal()
+                        fresh = db2.query(User).filter(User.user_id == u.user_id).first()
+                        if fresh and fresh.notified_today != today_str:
+                            send_daily_notification(fresh, db2)
+                            fresh.notified_today = today_str
+                            db2.commit()
+                            sent += 1
+                        db2.close()
+                    except Exception as e:
+                        print(f"[notify {u.user_id}] {e}")
+                    time.sleep(0.3)
+                if sent: print(f"[daily_notify] sent to {sent} users")
+
+            time.sleep(300)  # check every 5 min
+        except Exception as e:
+            print(f"[daily_notify_loop] {e}")
+            time.sleep(300)
+
+
+# ──────────────────────────────────────────────
+# CHANNEL SCHEDULER (2 picks + CTA)
 # ──────────────────────────────────────────────
 def channel_scheduler():
     posted_today = set()
@@ -2153,40 +2106,36 @@ def channel_scheduler():
 
             if hm == "08:00" and f"{today_str}-8am" not in posted_today and CHANNEL_ID:
                 try:
-                    pool = sb_fetch_events(timeline_hours=24, page_size=60)
-                    if not pool:
-                        pool = fetch_real_fixtures(days_ahead=0, limit=30)
+                    pool = sb_fetch_events(timeline_hours=24, page_size=60) or fetch_all_fixtures(limit=40)
                     if pool:
                         ranked = []
                         for f in pool[:30]:
                             try:
                                 p = predict_match(f)
-                                s = safety_score(f, p)
-                                ranked.append((s, f, p))
-                            except Exception:
-                                continue
+                                ranked.append((safety_score(f, p), f, p))
+                            except: continue
                         ranked.sort(key=lambda x: x[0], reverse=True)
 
                         msg = f"🎯 *TOP 2 FREE PICKS — {today_str}*\n\n"
                         for i, (_, f, p) in enumerate(ranked[:2], 1):
-                            msg += (f"{i}. *{f['home']} vs {f['away']}*\n"
+                            msg += (f"*{i}. {f['home']} vs {f['away']}*\n"
                                     f"   🏆 {f.get('league','')} · {f.get('time','')}\n"
                                     f"   ✅ {p['best_pick']} @ {p['odds']} ({p['confidence']}%)\n\n")
                         msg += (
-                            f"🔒 *18 more picks* + 20-match accumulator with "
-                            f"REAL SportyBet + Football.com codes are VIP-only.\n\n"
-                            f"👉 Click to upgrade and see full betslip: {BOT_LINK}\n\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"🔒 *8 MORE PICKS + 20-MATCH ACCUMULATOR*\n"
+                            f"with REAL SportyBet + Football.com codes\n"
+                            f"are VIP-only.\n\n"
+                            f"💎 *JOIN 5,000+ WINNERS TODAY*\n\n"
+                            f"👉 *Click to unlock full betslip:* {BOT_LINK}\n\n"
                             f"{BOT_HANDLE}"
                         )
                         send_message(CHANNEL_ID, msg, parse_mode="Markdown")
-                except Exception as e:
-                    print(f"8AM error: {e}")
+                except Exception as e: print(f"[8am] {e}")
                 posted_today.add(f"{today_str}-8am")
 
-            if hm == "00:05":
-                posted_today.clear()
-        except Exception as e:
-            print(f"Scheduler error: {e}")
+            if hm == "00:05": posted_today.clear()
+        except Exception as e: print(f"[sched] {e}")
         time.sleep(60)
 
 
@@ -2195,6 +2144,7 @@ def channel_scheduler():
 # ──────────────────────────────────────────────
 threading.Thread(target=load_brain, daemon=True).start()
 threading.Thread(target=channel_scheduler, daemon=True).start()
+threading.Thread(target=daily_notification_loop, daemon=True).start()
 
 
 @app.on_event("startup")
@@ -2206,8 +2156,7 @@ async def on_startup():
                f"?url={RENDER_URL}/webhook&drop_pending_updates=true")
         r = requests.get(url, timeout=10).json()
         print(f"WEBHOOK SET: {r}")
-    except Exception as e:
-        print(f"Webhook error: {e}")
+    except Exception as e: print(f"Webhook: {e}")
 
 
 # ──────────────────────────────────────────────
@@ -2215,16 +2164,14 @@ async def on_startup():
 # ──────────────────────────────────────────────
 @app.get("/")
 async def home():
-    return {
-        "status": "BetMaster Pro v3 — Professional AI Betting Bot",
-        "admins": len(ADMIN_IDS),
-        "features": ["13 markets", "value bets", "bankroll advisor",
-                     "20-match accumulator", "SportyBet codes",
-                     "Football.com codes", "N1M challenge", "admin panel",
-                     "professional inline menu", "persistent back-to-menu"],
-        "brain": f"{len(HISTORICAL_STATS)} teams",
-        "sb_cache": len(SB_EVENTS_CACHE.get("data", [])),
-    }
+    return {"status":"BetMaster Pro v4 — Conversion-Optimized",
+            "admins":len(ADMIN_IDS),
+            "features":["preferences","personalized accumulator","daily push",
+                        "analyze top 10","sure 10","15-fixture regions",
+                        "real SportyBet codes","Football.com codes",
+                        "persuasive CTA","N1M challenge","admin panel"],
+            "regions":list(REGIONS.keys()),
+            "brain":f"{len(HISTORICAL_STATS)} teams"}
 
 
 @app.post("/webhook")
@@ -2232,38 +2179,32 @@ async def webhook(request: Request):
     try:
         data = await request.json()
         threading.Thread(target=process_update, args=(data,), daemon=True).start()
-        return JSONResponse({"ok": True})
-    except Exception as e:
-        print(f"Webhook error: {e}")
-        return JSONResponse({"ok": True})
+        return JSONResponse({"ok":True})
+    except Exception as e: print(f"Webhook: {e}"); return JSONResponse({"ok":True})
 
 
 @app.get("/set-webhook")
 async def set_webhook():
     set_bot_menu()
-    r = requests.get(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
-        f"?url={RENDER_URL}/webhook&drop_pending_updates=true", timeout=10,
-    ).json()
+    r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
+                     f"?url={RENDER_URL}/webhook&drop_pending_updates=true", timeout=10).json()
     return r
 
 
 @app.get("/test-sportybet")
 async def test_sportybet():
     events = sb_fetch_events(timeline_hours=48, page_size=20)
-    return {"count": len(events), "sample": events[:3] if events else []}
+    return {"count":len(events),"sample":events[:3] if events else []}
 
 
 @app.get("/admin/whoami")
 async def admin_whoami(uid: str = ""):
-    try:
-        uid_int = int(uid)
-    except Exception:
-        return {"error": "Provide ?uid=123456789"}
-    return {"uid": uid_int, "is_admin": is_admin(uid_int)}
+    try: uid_int = int(uid)
+    except: return {"error":"Provide ?uid=123456789"}
+    return {"uid":uid_int,"is_admin":is_admin(uid_int)}
 
 
-# ── Payment routes ──
+# Payment routes
 @app.get("/subscribe", response_class=HTMLResponse)
 async def subscribe(request: Request):
     uid = request.query_params.get("uid", "")
@@ -2274,24 +2215,22 @@ async def subscribe(request: Request):
 async def pay(plan: str, uid: str):
     if not FLW_SECRET:
         return HTMLResponse(render_failed_page("Payment not configured.", uid), status_code=500)
-    if plan not in ("daily", "weekly", "monthly"):
+    if plan not in ("daily","weekly","monthly"):
         return HTMLResponse(render_failed_page(f"Invalid plan: {plan}", uid), status_code=400)
-    amounts = {"daily": 500, "weekly": 2000, "monthly": 5000}
+    amounts = {"daily":500,"weekly":2000,"monthly":5000}
     amount = amounts[plan]
     tx_ref = f"BETMASTER-{uid}-{plan}-{int(time.time())}"
-    payload = {
-        "tx_ref": tx_ref, "amount": amount, "currency": "NGN",
-        "redirect_url": f"{RENDER_URL}/verify?tx_ref={tx_ref}&uid={uid}&plan={plan}",
-        "customer": {"email": f"{uid}@betmasterpro.com", "name": f"User {uid}"},
-        "customizations": {"title": f"BetMaster Pro — {plan.title()}"},
-        "payment_options": "card,banktransfer,ussd,mobilemoney",
-    }
+    payload = {"tx_ref":tx_ref,"amount":amount,"currency":"NGN",
+        "redirect_url":f"{RENDER_URL}/verify?tx_ref={tx_ref}&uid={uid}&plan={plan}",
+        "customer":{"email":f"{uid}@betmasterpro.com","name":f"User {uid}"},
+        "customizations":{"title":f"BetMaster Pro — {plan.title()}"},
+        "payment_options":"card,banktransfer,ussd,mobilemoney"}
     try:
         r = requests.post("https://api.flutterwave.com/v3/payments", json=payload,
-                          headers={"Authorization": f"Bearer {FLW_SECRET}"}, timeout=20).json()
-        if r.get("status") == "success" and r.get("data", {}).get("link"):
+            headers={"Authorization":f"Bearer {FLW_SECRET}"}, timeout=20).json()
+        if r.get("status")=="success" and r.get("data",{}).get("link"):
             return RedirectResponse(r["data"]["link"])
-        return HTMLResponse(render_failed_page(r.get("message", "Failed"), uid), status_code=400)
+        return HTMLResponse(render_failed_page(r.get("message","Failed"), uid), status_code=400)
     except Exception as e:
         return HTMLResponse(render_failed_page(f"Error: {e}", uid), status_code=500)
 
@@ -2300,19 +2239,16 @@ async def pay(plan: str, uid: str):
 async def verify(tx_ref: str, uid: str, plan: str):
     try:
         r = requests.get(f"https://api.flutterwave.com/v3/transactions?tx_ref={tx_ref}",
-                         headers={"Authorization": f"Bearer {FLW_SECRET}"}, timeout=20).json()
-        if r.get("status") == "success" and r.get("data"):
+            headers={"Authorization":f"Bearer {FLW_SECRET}"}, timeout=20).json()
+        if r.get("status")=="success" and r.get("data"):
             data = r["data"][0] if isinstance(r["data"], list) else r["data"]
-            if data.get("status") in ("successful", "completed"):
+            if data.get("status") in ("successful","completed"):
                 activate_vip(uid, plan)
                 try:
-                    db = SessionLocal()
-                    u = get_user(db, int(uid))
-                    if u.referred_by:
-                        award_referral(db, u.referred_by, int(uid))
+                    db = SessionLocal(); u = get_user(db, int(uid))
+                    if u.referred_by: award_referral(db, u.referred_by, int(uid))
                     db.close()
-                except Exception:
-                    pass
+                except: pass
                 return HTMLResponse(render_success_page(plan))
             return HTMLResponse(render_failed_page(f"Status: {data.get('status')}", uid), status_code=400)
         return HTMLResponse(render_failed_page("Not found.", uid), status_code=404)
@@ -2323,44 +2259,37 @@ async def verify(tx_ref: str, uid: str, plan: str):
 @app.post("/flutterwave-webhook")
 async def flutterwave_webhook(request: Request):
     try:
-        sig = request.headers.get("verif-hash", "")
+        sig = request.headers.get("verif-hash","")
         if FLW_WEBHOOK_HASH and sig != FLW_WEBHOOK_HASH:
-            return JSONResponse({"status": "invalid"}, status_code=401)
+            return JSONResponse({"status":"invalid"}, status_code=401)
         payload = await request.json()
-        data = payload.get("data", {})
-        if data.get("status", "").lower() not in ("successful", "completed"):
-            return JSONResponse({"status": "ignored"})
-        tx_ref = data.get("tx_ref", "")
+        data = payload.get("data",{})
+        if data.get("status","").lower() not in ("successful","completed"):
+            return JSONResponse({"status":"ignored"})
+        tx_ref = data.get("tx_ref","")
         parts = tx_ref.split("-")
-        if len(parts) < 4 or parts[0] != "BETMASTER":
-            return JSONResponse({"status": "malformed"})
+        if len(parts)<4 or parts[0]!="BETMASTER":
+            return JSONResponse({"status":"malformed"})
         uid, plan = parts[1], parts[2]
-        verify = requests.get(
-            f"https://api.flutterwave.com/v3/transactions/{data.get('id')}/verify",
-            headers={"Authorization": f"Bearer {FLW_SECRET}"}, timeout=15,
-        ).json()
-        if (verify.get("status") == "success" and
-                verify.get("data", {}).get("status") == "successful"):
+        verify = requests.get(f"https://api.flutterwave.com/v3/transactions/{data.get('id')}/verify",
+            headers={"Authorization":f"Bearer {FLW_SECRET}"}, timeout=15).json()
+        if (verify.get("status")=="success" and
+            verify.get("data",{}).get("status")=="successful"):
             db = SessionLocal()
             try:
                 u = get_user(db, int(uid))
                 if u.is_vip and u.vip_expiry >= str(date.today()):
-                    return JSONResponse({"status": "already_active"})
-            finally:
-                db.close()
+                    return JSONResponse({"status":"already_active"})
+            finally: db.close()
             activate_vip(uid, plan)
-        return JSONResponse({"status": "success"})
-    except Exception as e:
-        print(f"Webhook error: {e}")
-        return JSONResponse({"status": "error"}, status_code=500)
+        return JSONResponse({"status":"success"})
+    except Exception as e: print(f"Webhook: {e}"); return JSONResponse({"status":"error"}, status_code=500)
 
 
-# ──────────────────────────────────────────────
-# PAYMENT TEMPLATES
-# ──────────────────────────────────────────────
+# Payment templates (unchanged)
 PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
-<html lang="en"><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>BetMaster Pro — VIP</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -2385,25 +2314,23 @@ ul{list-style:none;margin:20px 0}
 ul li{padding:6px 0;font-size:13.5px}
 ul li:before{content:"✅ ";color:#22c55e}
 .btn{display:block;padding:14px;border-radius:10px;text-decoration:none;
-color:white;text-align:center;font-weight:600;font-size:14.5px;margin-top:16px;
-transition:transform .2s}
+color:white;text-align:center;font-weight:600;font-size:14.5px;margin-top:16px}
 .btn-g{background:linear-gradient(135deg,#22c55e,#16a34a)}
 .btn-b{background:linear-gradient(135deg,#3b82f6,#2563eb)}
-.btn:hover{transform:translateY(-1px)}
 .foot{margin-top:40px;padding:20px 0;border-top:1px solid rgba(255,255,255,.08);
 text-align:center;font-size:12px;color:#5a6378}
 @media(max-width:720px){.plans{grid-template-columns:1fr}h1{font-size:26px}}
 </style></head><body>
 <div class="wrap">
 <h1>Unlock AI Football Predictions</h1>
-<p class="lead">13 markets · Real SportyBet + Football.com codes · 20-match accumulator · N1M challenge</p>
+<p class="lead">13 markets · Personalized to your regions · Real SportyBet + Football.com codes</p>
 <div class="plans">
 <div class="plan"><div class="name">Daily</div><div class="price">₦500<small>/24h</small></div>
 <ul><li>10 predictions</li><li>20-match accumulator</li><li>Real codes</li></ul>
 <a href="/pay?plan=daily&uid={{UID}}" class="btn btn-g">Get 24h</a></div>
 <div class="plan featured"><div class="name">Monthly (Best)</div>
 <div class="price">₦5,000<small>/month</small></div>
-<ul><li>Everything in Weekly</li><li>Priority support</li><li>Early features</li></ul>
+<ul><li>Everything</li><li>Priority support</li><li>Early features</li></ul>
 <a href="/pay?plan=monthly&uid={{UID}}" class="btn btn-b">Get Monthly</a></div>
 <div class="plan"><div class="name">Weekly</div><div class="price">₦2,000<small>/week</small></div>
 <ul><li>10 predictions/day</li><li>All 13 markets</li><li>Value bets</li></ul>
@@ -2411,7 +2338,6 @@ text-align:center;font-size:12px;color:#5a6378}
 </div>
 <div class="foot">© {{YEAR}} BetMaster Pro · 18+ · Bet responsibly</div>
 </div></body></html>"""
-
 
 SUCCESS_TEMPLATE = r"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Success</title>
@@ -2424,47 +2350,12 @@ a{display:block;padding:15px;background:linear-gradient(135deg,#22c55e,#16a34a);
 color:white;text-decoration:none;border-radius:12px;font-weight:600;margin-top:20px}
 </style></head><body>
 <div class="card"><h1>✅ {{PLAN}} Activated</h1>
-<p>Return to the bot to start.</p>
+<p>Return to the bot to start winning.</p>
 <a href="{{BOT_LINK}}">Open Bot</a></div></body></html>"""
-
 
 FAILED_TEMPLATE = r"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Failed</title>
 <style>body{font-family:Arial,sans-serif;background:#0a0e1a;color:#e8ecf5;
 display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px}
 .card{background:rgba(255,255,255,.03);border:1px solid rgba(239,68,68,.25);
-border-radius:20px;padding:48px 36px;max-width:440px;text-align:center}
-h1{color:#fca5a5}.reason{background:rgba(0,0,0,.3);border-radius:10px;padding:14px;
-font-family:monospace;font-size:13px;margin:20px 0;word-break:break-word}
-a{display:block;padding:14px;border-radius:12px;text-decoration:none;margin-top:10px}
-.a{background:linear-gradient(135deg,#22c55e,#16a34a);color:white}
-.b{background:transparent;color:#8b94ab;border:1px solid rgba(255,255,255,.1)}
-</style></head><body>
-<div class="card"><h1>Payment Not Confirmed</h1>
-<div class="reason">{{REASON}}</div>
-<a href="/subscribe?uid={{UID}}" class="a">Try Again</a>
-<a href="{{BOT_LINK}}" class="b">Contact Support</a></div></body></html>"""
-
-
-def render_payment_page(uid):
-    from datetime import datetime as _dt
-    return (PAYMENT_TEMPLATE.replace("{{UID}}", str(uid))
-            .replace("{{BOT_LINK}}", BOT_LINK)
-            .replace("{{YEAR}}", str(_dt.now().year)))
-
-
-def render_success_page(plan):
-    return SUCCESS_TEMPLATE.replace("{{PLAN}}", plan.upper()).replace("{{BOT_LINK}}", BOT_LINK)
-
-
-def render_failed_page(reason, uid=""):
-    return (FAILED_TEMPLATE.replace("{{REASON}}", html.escape(str(reason))[:500])
-            .replace("{{UID}}", str(uid)).replace("{{BOT_LINK}}", BOT_LINK))
-
-
-# ──────────────────────────────────────────────
-# RUN
-# ──────────────────────────────────────────────
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+border-radius:20px;padding:48px
