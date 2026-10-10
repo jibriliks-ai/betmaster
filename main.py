@@ -1,7 +1,10 @@
 """
-main.py — BetMaster Pro v7
-VIP-gated markets + proof page + league gating + team stats + interactive buttons
-+ FULL USER PERSISTENCE (welcome back, preferred plan memory, /remember, /debug-db).
+main.py — BetMaster Pro v8
+VIP markets + proof page + league gating + team stats + interactive buttons
++ full user persistence + channel link branding.
+
+Channel: Bet Master Pro (https://t.me/+IFK0qoDI2B5lYWI0)
+Bot: @Betmasterpro_bot
 """
 
 import os, time, threading, requests, json, traceback, random, hashlib, csv, io, re, math, html
@@ -27,6 +30,10 @@ THE_ODDS_API_KEY = os.getenv("THE_ODDS_API_KEY", "")
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL") or "https://betmaster-p09f.onrender.com"
 BOT_LINK = "https://t.me/Betmasterpro_bot"
 BOT_HANDLE = "@Betmasterpro_bot"
+
+# ── CHANNEL BRANDING ──
+CHANNEL_LINK = "https://t.me/+IFK0qoDI2B5lYWI0"
+CHANNEL_NAME = "Bet Master Pro"
 
 ADMIN_IDS_RAW = os.getenv("ADMIN_ID", "")
 ADMIN_IDS = set()
@@ -116,6 +123,7 @@ def get_inline_menu(is_admin_user=False):
          {"text":"⚙️ Preferences","callback_data":"menu_prefs"}],
         [{"text":"🎁 Refer & Earn","callback_data":"menu_refer"},
          {"text":"💎 Upgrade","callback_data":"menu_upgrade"}],
+        [{"text":"📢 Join Channel","url":CHANNEL_LINK}],
     ]
     if is_admin_user:
         rows.append([{"text":"🔐 Admin Panel","callback_data":"menu_admin"}])
@@ -221,7 +229,6 @@ try: Base.metadata.create_all(bind=engine)
 except Exception as e: print(f"DB init: {e}")
 
 def ensure_schema():
-    """Lightweight migration — adds missing columns to existing tables."""
     from sqlalchemy import text, inspect
     try:
         insp = inspect(engine)
@@ -260,10 +267,8 @@ def get_user(db, user_id, username="", first_name=""):
         if user.is_vip and user.vip_expiry and user.vip_expiry < today_str:
             user.is_vip = False; user.vip_plan = ""; db.commit()
         user.last_seen = datetime.utcnow()
-        try:
-            user.total_visits = (user.total_visits or 0) + 1
-        except Exception:
-            pass
+        try: user.total_visits = (user.total_visits or 0) + 1
+        except Exception: pass
         if username and user.username != username: user.username = username
         if first_name and user.first_name != first_name: user.first_name = first_name
         db.commit(); return user
@@ -306,7 +311,8 @@ def activate_vip(uid, plan, silent=False):
                 f"✅ 🌏 All Asian / 🇺🇸 American / 🌍 African leagues\n"
                 f"✅ 🚀 N1M Challenge\n"
                 f"✅ Full 13-market probabilities + bankroll advisor\n\n"
-                f"Welcome to the winning side. 💎"
+                f"Welcome to the winning side. 💎\n\n"
+                f"📢 *Join our channel:* {CHANNEL_LINK}"
             ), reply_markup=get_main_keyboard(is_admin(int(uid))), parse_mode="Markdown")
         return True
     except Exception as e:
@@ -615,7 +621,7 @@ def stake_advice(conf, bankroll=10000.0):
     else: pct=1.0
     return {"percent":pct,"amount":round(bankroll*pct/100,2)}
 
-# ── TEAM STATS + INTERACTIVE HANDLERS ──
+# ── TEAM STATS + INTERACTIVE ──
 def find_team_in_brain(team_name):
     if not team_name: return None, None
     t = team_name.strip().lower()
@@ -692,8 +698,7 @@ def handle_h2h_callback(chat_id, home, away):
         send_message(chat_id, (
             f"📈 *Head-to-Head*\n\n*{home}* vs *{away}*\n\n"
             f"No direct H2H history in my brain for these two teams.\n\n"
-            f"💡 This can happen when teams have never met in loaded leagues, "
-            f"or one team is outside my historical data.\n\n"
+            f"💡 This can happen when teams have never met in loaded leagues.\n\n"
             f"The bot still uses form + xG for its prediction."
         ), reply_markup=add_footer_button(), parse_mode="Markdown")
         return
@@ -1070,7 +1075,8 @@ def build_upgrade_cta(user, hidden_count=8, context="daily", region_label=None, 
         f"🔥 *JOIN 5,000+ WINNING VIP MEMBERS*\n\n"
         f"VIP users win *3x more* than free users.\n"
         f"Don't leave money on the table.\n\n"
-        f"⏰ *First week for ₦1,600 (20% OFF)*"
+        f"⏰ *First week for ₦1,600 (20% OFF)*\n\n"
+        f"📢 *Also join our channel:* {CHANNEL_LINK}"
     )
 
 def upgrade_buttons(uid):
@@ -1081,6 +1087,7 @@ def upgrade_buttons(uid):
           "url": f"{RENDER_URL}/subscribe?uid={uid}"}],
         [{"text":"⚡ 24h Trial — ₦500",
           "url": f"{RENDER_URL}/subscribe?uid={uid}"}],
+        [{"text":f"📢 Join {CHANNEL_NAME}","url":CHANNEL_LINK}],
         get_footer_menu_button(),
     ]}
 
@@ -1209,6 +1216,7 @@ def handle_pref_confirm(chat_id, user, db, msg_id=None):
     conf = (f"✅ *PREFERENCES SAVED!*\n\nYour betting preferences:\n{labs}\n\n"
             f"🎯 Your daily picks and accumulators will now be personalized.\n"
             f"📬 You'll get a daily push at *09:00 WAT* with picks from your regions.\n\n"
+            f"📢 *Join our channel:* {CHANNEL_LINK}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n👇 *Now let's find you some winners*")
     if msg_id:
         try:
@@ -1233,7 +1241,7 @@ def send_main_menu(chat_id, user, db):
         status = (f"🆓 *FREE TIER* — you're missing 8 winning picks today\n"
                   f"💎 *Upgrade to unlock everything* 👇")
     text = (
-        f"🏆 *BETMASTER PRO* — AI Betting Intelligence\n\n"
+        f"🏆 *{CHANNEL_NAME.upper()}* — AI Betting Intelligence\n\n"
         f"🧠 Dixon-Coles AI engine · 13 markets\n"
         f"🌍 Africa · Asia · Europe · America · National\n"
         f"📊 Team stats · H2H · Odds compare\n"
@@ -1252,7 +1260,6 @@ def send_main_menu(chat_id, user, db):
     send_message(chat_id, "⚡ Quick access buttons below", reply_markup=get_main_keyboard(admin))
 
 def send_start_message(chat_id, user, db):
-    """Send /start with welcome-back detection + preference flow."""
     admin = is_admin(user.user_id)
     visits = getattr(user, "total_visits", 0) or 0
     has_history = (
@@ -1287,6 +1294,7 @@ def send_start_message(chat_id, user, db):
             f"🔥 Current streak: *{user.streak or 0}*\n"
             f"👁 Last visit: {last_seen_txt}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📢 *Channel:* {CHANNEL_NAME} — {CHANNEL_LINK}\n\n"
             f"👇 *Ready to find today's winners?*"
         )
         send_message(chat_id, msg, reply_markup=get_inline_menu(admin), parse_mode="Markdown")
@@ -1294,7 +1302,7 @@ def send_start_message(chat_id, user, db):
         return
     if not user.preferences_set and not admin:
         send_message(chat_id, (
-            f"🏆 *WELCOME TO BETMASTER PRO!*\n\n"
+            f"🏆 *WELCOME TO {CHANNEL_NAME.upper()}!*\n\n"
             f"You're joining *5,000+ winners* who use AI to dominate the bookies.\n\n"
             f"🧠 Dixon-Coles AI engine · 13 markets\n"
             f"📊 Team stats · H2H · Odds compare\n"
@@ -1302,6 +1310,7 @@ def send_start_message(chat_id, user, db):
             f"🎯 Correct Score + Handicap markets (VIP)\n"
             f"🎫 20-match Betslip with real booking codes (VIP)\n"
             f"🚀 N1M Challenge — ₦1,000 → ₦1,000,000\n\n"
+            f"📢 *Follow our channel:* {CHANNEL_LINK}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"*First, let's set up your preferences.*\n"
             f"Pick up to *3 regions* you want predictions from."
@@ -1319,7 +1328,7 @@ def handle_remember(chat_id, user, db):
     joined = user.created_at.strftime("%d %b %Y") if user.created_at else "—"
     last = user.last_seen.strftime("%d %b %Y %H:%M") if user.last_seen else "—"
     msg = (
-        f"🧠 *What BetMaster Remembers About You*\n\n"
+        f"🧠 *What {CHANNEL_NAME} Remembers About You*\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🆔 User ID: `{user.user_id}`\n"
         f"👤 Name: {user.first_name or user.username or 'Anon'}\n"
@@ -1818,7 +1827,7 @@ def handle_admin_broadcast(chat_id, message):
 def handle_admin_test_channel(chat_id):
     if not CHANNEL_ID:
         send_message(chat_id, "❌ CHANNEL_ID not set.", reply_markup=add_footer_button()); return
-    r = send_message(CHANNEL_ID, f"🧪 Test\n{BOT_LINK}")
+    r = send_message(CHANNEL_ID, f"🧪 Test from {CHANNEL_NAME}\n{BOT_LINK}")
     send_message(chat_id, f"Sent: {bool(r and r.get('ok'))}", reply_markup=add_footer_button())
 
 def handle_admin_addproof(chat_id, args_text):
@@ -1929,7 +1938,7 @@ def handle_menu_callback(chat_id, user, db, action, msg_id=None):
             f"✅ They get 20% off their first month\n\n"
             f"Referrals: {user.referral_count or 0}"
         ), reply_markup=add_footer_button({"inline_keyboard":[[
-            {"text":"📤 Share Link","url":f"https://t.me/share/url?url={ref_link}&text=Join%20BetMaster%20Pro"}]]}),
+            {"text":"📤 Share Link","url":f"https://t.me/share/url?url={ref_link}&text=Join%20{CHANNEL_NAME.replace(' ','%20')}"}]]}),
         parse_mode="Markdown")
     elif action == "menu_upgrade":
         if is_admin(user.user_id):
@@ -1947,7 +1956,8 @@ def handle_menu_callback(chat_id, user, db, action, msg_id=None):
             f"✅ Full 13-market probabilities + bankroll advisor\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🔥 *JOIN 5,000+ WINNING VIP MEMBERS*\n\n"
-            f"*Plans:*\n• Daily — ₦500\n• Weekly — ₦2,000\n• Monthly — ₦5,000"
+            f"*Plans:*\n• Daily — ₦500\n• Weekly — ₦2,000\n• Monthly — ₦5,000\n\n"
+            f"📢 *Channel:* {CHANNEL_NAME} — {CHANNEL_LINK}"
         ), reply_markup=upgrade_buttons(user.user_id), parse_mode="Markdown")
     elif action == "menu_help":
         admin_line = ("\n🔐 Admin:\n/admin /admin_stats /admin_users\n"
@@ -1963,6 +1973,7 @@ def handle_menu_callback(chat_id, user, db, action, msg_id=None):
             f"*Or send:* `Arsenal vs Chelsea` for instant analysis\n\n"
             f"💡 *After any prediction you get interactive buttons:*\n"
             f"📈 H2H  ·  📊 Form  ·  💰 Odds Compare\n"
+            f"📢 *Channel:* {CHANNEL_NAME} — {CHANNEL_LINK}\n"
             f"{admin_line}\nFREE 2/day · VIP 10/day\n{BOT_LINK}"
         ), reply_markup=add_footer_button(), parse_mode="Markdown")
     elif action == "menu_admin" and is_admin(user.user_id):
@@ -2115,6 +2126,13 @@ def process_update(upd):
                 handle_remember(chat_id, user, db)
             elif low.startswith("/help"):
                 handle_menu_callback(chat_id, user, db, "menu_help")
+            elif low.startswith("/channel"):
+                send_message(chat_id, (
+                    f"📢 *{CHANNEL_NAME}*\n\n"
+                    f"Join our official channel for daily free picks, "
+                    f"VIP previews and community discussion.\n\n"
+                    f"👉 {CHANNEL_LINK}"
+                ), reply_markup=add_footer_button(), parse_mode="Markdown")
             elif low.startswith("/europeanleagues"):
                 handle_region(chat_id, user, db, "europe")
             elif low.startswith("/asianleagues"):
@@ -2277,7 +2295,12 @@ def channel_scheduler():
                                 p = predict_match(f); ranked.append((safety_score(f, p), f, p))
                             except: continue
                         ranked.sort(key=lambda x: x[0], reverse=True)
-                        msg = f"🎯 *TOP 2 FREE PICKS — {today_str}*\n\n"
+                        msg = (
+                            f"🏆 *{CHANNEL_NAME.upper()}* — Daily Predictions\n"
+                            f"📅 {today_str}\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                            f"🎯 *TOP 2 FREE PICKS*\n\n"
+                        )
                         for i, (_, f, p) in enumerate(ranked[:2], 1):
                             msg += (f"*{i}. {f['home']} vs {f['away']}*\n"
                                     f"   🏆 {f.get('league','')} · {f.get('time','')}\n"
@@ -2289,7 +2312,9 @@ def channel_scheduler():
                             f"✅ Correct Score + Handicap\n"
                             f"✅ 20-match Betslip with real booking codes\n"
                             f"✅ Asian / American / African leagues\n\n"
-                            f"👉 *Click to unlock:* {BOT_LINK}\n\n{BOT_HANDLE}"
+                            f"👉 *Unlock on the bot:* {BOT_LINK}\n"
+                            f"📢 *Channel:* {CHANNEL_NAME} — {CHANNEL_LINK}\n\n"
+                            f"{BOT_HANDLE}"
                         )
                         send_message(CHANNEL_ID, msg, parse_mode="Markdown")
                 except Exception as e: print(f"[8am] {e}")
@@ -2307,7 +2332,8 @@ threading.Thread(target=daily_notification_loop, daemon=True).start()
 async def on_startup():
     set_bot_menu()
     print(f"[startup] Admins: {ADMIN_IDS}")
-    print(f"[startup] DB URL: {DATABASE_URL.split('@')[-1] if '@' in DATABASE_URL else DATABASE_URL[:40]}")
+    print(f"[startup] Channel: {CHANNEL_NAME} — {CHANNEL_LINK}")
+    print(f"[startup] DB: {DATABASE_URL.split('@')[-1] if '@' in DATABASE_URL else DATABASE_URL[:40]}")
     try:
         url = (f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
                f"?url={RENDER_URL}/webhook&drop_pending_updates=true")
@@ -2318,13 +2344,14 @@ async def on_startup():
 # ── FASTAPI ──
 @app.get("/")
 async def home():
-    return {"status":"BetMaster Pro v7 — Full Persistence + Interactive",
+    return {"status":f"{CHANNEL_NAME} v8 — Full Persistence + Interactive",
+            "channel":CHANNEL_LINK,
             "admins":len(ADMIN_IDS),
             "features":["vip markets","proof page","league gating","preferences",
                         "personalized accumulator","daily push","betslip codes",
                         "N1M challenge","admin panel","team stats","h2h","form",
                         "odds compare","persistent memory","welcome back",
-                        "preferred plan"],
+                        "preferred plan","channel branding"],
             "brain":f"{len(HISTORICAL_STATS)} teams"}
 
 @app.post("/webhook")
@@ -2360,6 +2387,7 @@ async def debug_db():
         total = db.query(User).count()
         recent = db.query(User).order_by(User.last_seen.desc()).limit(5).all()
         return {
+            "channel": CHANNEL_LINK,
             "db_url": DATABASE_URL.split("@")[-1] if "@" in DATABASE_URL else DATABASE_URL[:30],
             "persistent": "postgresql" in DATABASE_URL or "/data/" in DATABASE_URL,
             "total_users": total,
@@ -2412,7 +2440,7 @@ def build_proof_html():
     <section class="proofs">
       <div class="proofs-header">
         <h2>📈 Verified Winning Predictions</h2>
-        <p class="proofs-sub">Real results from real matches — updated daily</p>
+        <p class="proofs-sub">Real results from real matches — updated daily by {CHANNEL_NAME}</p>
         <div class="proofs-stats">
           <div class="proof-stat"><div class="proof-stat-num">{win_rate}%</div>
           <div class="proof-stat-lbl">Win Rate</div></div>
@@ -2463,7 +2491,7 @@ async def pay(plan: str, uid: str):
     payload = {"tx_ref":tx_ref,"amount":amount,"currency":"NGN",
         "redirect_url":f"{RENDER_URL}/verify?tx_ref={tx_ref}&uid={uid}&plan={plan}",
         "customer":{"email":f"{uid}@betmasterpro.com","name":f"User {uid}"},
-        "customizations":{"title":f"BetMaster Pro — {plan.title()}"},
+        "customizations":{"title":f"{CHANNEL_NAME} — {plan.title()}"},
         "payment_options":"card,banktransfer,ussd,mobilemoney"}
     try:
         r = requests.post("https://api.flutterwave.com/v3/payments", json=payload,
@@ -2527,7 +2555,7 @@ async def flutterwave_webhook(request: Request):
 PAYMENT_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>BetMaster Pro — VIP</title>
+<title>Bet Master Pro — VIP</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Arial,sans-serif;
@@ -2537,6 +2565,9 @@ h1{font-size:34px;font-weight:700;letter-spacing:-.03em;margin:30px 0 12px;
 background:linear-gradient(180deg,#fff,#b8c1d6);-webkit-background-clip:text;
 -webkit-text-fill-color:transparent}
 p.lead{color:#8b94ab;font-size:15px;margin-bottom:30px}
+.channel-badge{display:inline-block;padding:8px 16px;background:rgba(34,197,94,.1);
+border:1px solid rgba(34,197,94,.25);border-radius:999px;color:#4ade80;
+font-size:13px;font-weight:600;margin-bottom:20px}
 .plans{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:50px}
 .plan{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);
 border-radius:16px;padding:26px 22px;position:relative}
@@ -2584,6 +2615,9 @@ letter-spacing:.08em;color:#8b94ab;font-weight:600}
 .p-pick{color:#4ade80;font-weight:600}
 .p-odds{color:#f5b945;font-weight:600;text-align:right}
 .p-status{text-align:right;font-size:15px}
+.cta-channel{display:block;padding:16px;background:rgba(34,197,94,.08);
+border:1px solid rgba(34,197,94,.25);border-radius:12px;text-decoration:none;
+color:#4ade80;text-align:center;font-weight:600;margin-top:24px}
 @media(max-width:720px){
   .plans{grid-template-columns:1fr}h1{font-size:26px}
   .proof-head,.proof-row{grid-template-columns:70px 1fr 70px 50px 30px;
@@ -2594,6 +2628,9 @@ letter-spacing:.08em;color:#8b94ab;font-weight:600}
 text-align:center;font-size:12px;color:#5a6378}
 </style></head><body>
 <div class="wrap">
+<div style="text-align:center">
+<div class="channel-badge">🏆 Bet Master Pro — Official</div>
+</div>
 <h1>Unlock AI Football Predictions</h1>
 <p class="lead">13 markets · Personalized to your regions · Real SportyBet + Football.com codes</p>
 <div class="plans">
@@ -2609,7 +2646,8 @@ text-align:center;font-size:12px;color:#5a6378}
 <a href="/pay?plan=weekly&uid={{UID}}" class="btn btn-g">Get Weekly</a></div>
 </div>
 {{PROOFS}}
-<div class="foot">© {{YEAR}} BetMaster Pro · 18+ · Bet responsibly</div>
+<a href="{{CHANNEL_LINK}}" class="cta-channel">📢 Join {{CHANNEL_NAME}} on Telegram →</a>
+<div class="foot">© {{YEAR}} Bet Master Pro · 18+ · Bet responsibly</div>
 </div></body></html>"""
 
 SUCCESS_TEMPLATE = r"""<!DOCTYPE html>
@@ -2621,10 +2659,12 @@ border-radius:20px;padding:48px 36px;max-width:440px;text-align:center}
 h1{color:#4ade80;margin:20px 0 10px}
 a{display:block;padding:15px;background:linear-gradient(135deg,#22c55e,#16a34a);
 color:white;text-decoration:none;border-radius:12px;font-weight:600;margin-top:20px}
+.b{background:transparent;color:#8b94ab;border:1px solid rgba(255,255,255,.1)}
 </style></head><body>
 <div class="card"><h1>✅ {{PLAN}} Activated</h1>
 <p>Return to the bot to start winning.</p>
-<a href="{{BOT_LINK}}">Open Bot</a></div></body></html>"""
+<a href="{{BOT_LINK}}">Open Bot</a>
+<a href="{{CHANNEL_LINK}}" class="b">📢 Join Channel</a></div></body></html>"""
 
 FAILED_TEMPLATE = r"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>Failed</title>
@@ -2650,6 +2690,8 @@ def render_payment_page(uid, proofs_html="", preferred=""):
                 if preferred == p else "")
     html = PAYMENT_TEMPLATE.replace("{{UID}}", str(uid))
     html = html.replace("{{BOT_LINK}}", BOT_LINK)
+    html = html.replace("{{CHANNEL_LINK}}", CHANNEL_LINK)
+    html = html.replace("{{CHANNEL_NAME}}", CHANNEL_NAME)
     html = html.replace("{{PROOFS}}", proofs_html)
     html = html.replace("{{YEAR}}", str(_dt.now().year))
     html = html.replace("{{BADGE_DAILY}}", badge("daily"))
@@ -2658,7 +2700,9 @@ def render_payment_page(uid, proofs_html="", preferred=""):
     return html
 
 def render_success_page(plan):
-    return SUCCESS_TEMPLATE.replace("{{PLAN}}", plan.upper()).replace("{{BOT_LINK}}", BOT_LINK)
+    return (SUCCESS_TEMPLATE.replace("{{PLAN}}", plan.upper())
+            .replace("{{BOT_LINK}}", BOT_LINK)
+            .replace("{{CHANNEL_LINK}}", CHANNEL_LINK))
 
 def render_failed_page(reason, uid=""):
     return (FAILED_TEMPLATE.replace("{{REASON}}", html.escape(str(reason))[:500])
